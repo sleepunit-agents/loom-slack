@@ -35,7 +35,7 @@
       {
         "name": "SLACK_BOTS",
         "label": "Each agent's app",
-        "hint": "JSON: agent to the secret holding its app's env file (SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_TEAM_ID, SLACK_BOT_USER_ID), like {\"kit\": \"kit-slack.env\"}; the secrets piece's policy must allow that agent",
+        "hint": "JSON: agent to the secret holding its app's env file (SLACK_BOT_TOKEN, _APP_TOKEN, _TEAM_ID, _BOT_USER_ID), like {\"kit\": \"kit-slack.env\"}; the secrets policy must allow it",
         "required": true
       },
       {

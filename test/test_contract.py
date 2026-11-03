@@ -44,6 +44,14 @@ class Contract(unittest.TestCase):
             self.assertIn(v["send"][0], bins)
         for s in block["services"]:
             self.assertIn(s["argv"][0], bins)
+        # loom's own limits on the block (src/cli/pieces-managed.ts), so an install isn't the first to say so
+        self.assertLessEqual(len(block["description"]), 300)
+        self.assertLessEqual(len(block["settings"]), 20)
+        for s in block["settings"]:
+            self.assertLessEqual(len(s["label"]), 100, s["name"])
+            self.assertLessEqual(len(s.get("hint", "")), 200, s["name"])
+            self.assertLessEqual(len(s.get("default", "")), 500, s["name"])
+            self.assertFalse(s["name"].startswith("LOOM_"), s["name"])
         self.assertNotIn("delivery", block)
         self.assertNotIn("grants", block)
 
