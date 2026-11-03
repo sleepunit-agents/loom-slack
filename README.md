@@ -80,11 +80,20 @@ answers `allowed` does this piece read it (host-side, `get --reveal`). The value
 | `SLACK_LOOM_URL` | loom's address (`http://127.0.0.1:8787`) |
 | `SLACK_GATES_COMMAND` | a JSON argv printing `{"doc": …}`, `{agent}` filled in |
 
+## What the runtime asks of a place, and a body at work
+
+- `send --describe` answers `{ok, guest: false, peer: false, venue, readers: [], notes: []}`, because Slack routes
+  only tier 2 and up. A tier's extra brief is the agent's policy's (`briefs.tiers`), in the runtime.
+- `send --status working --message <delivery id>` (and `done`) is the runtime's word that a body is at work. Live,
+  the intake puts 👀 (`eyes`) on the message the body took, and takes it off once the agent's `send` posts there or the
+  body is done.
+- **To one person:** `send --place dm:<user id>` opens that person's DM and posts there. The runtime's `send --person
+  <slug> --via slack` runs it with the person's id from the gates.
+
 ## Not here (yet)
 
-Bridge features that are about bodies, not routing: the 👀 reaction, the local transcript a body read as context,
-fetching files, a tier's extra brief, and relays from other agents (the runtime's now). `render` isn't declared:
-loom's generic render shows these conversations.
+The local transcript a body read as context, fetching files, and a group DM's roster and restricts. `render` isn't
+declared: loom's generic render shows these conversations.
 
 ## Tests
 

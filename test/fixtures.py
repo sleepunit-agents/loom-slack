@@ -38,6 +38,8 @@ class FakeSlack:
             return {"channel": {"id": "D" + p["users"]}}
         if method == "chat.postMessage":
             return {"ts": f"9.{len(self.calls):06d}"}
+        if method in ("reactions.add", "reactions.remove"):
+            return {}
         raise AssertionError(method)
 
 
