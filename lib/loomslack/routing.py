@@ -48,12 +48,16 @@ class Slack:
         if not d.get("ok"):
             if d.get("error") == "ratelimited":
                 raise RateLimited(60.0)
-            raise SlackError(f"{method}: {d.get('error')}")
+            raise SlackError(f"{method}: {d.get('error')}", d.get("error"))
         return d
 
 
 class SlackError(Exception):
-    pass
+    """Slack answered ok: false; `error` is its code (channel_not_found, not_in_channel, fatal_error, …)."""
+
+    def __init__(self, message, error=None):
+        super().__init__(message)
+        self.error = error if error is not None else str(message).rpartition(": ")[2]
 
 
 class RateLimited(Exception):

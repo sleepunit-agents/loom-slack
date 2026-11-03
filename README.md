@@ -58,7 +58,13 @@ same agents and places on both sides, and there must be at least 20. Exit 0 agre
 ## Send
 
 `loom-slack send --place <place> --agent <agent>`, the text on stdin: a DM's conversation is opened by the user id, a
-group posts to its own id, split under 3900 characters, answering `{ok, id?}` or `{ok: false, reason}`. Run by
+group posts to its own id, split under 3900 characters, answering `{ok, id?}` or `{ok: false, reason, permanent?}`.
+`permanent: true` is a refusal no retry will change, which the runtime records as refused and doesn't retry or keep
+for a body: shadow mode, no app for that agent, not a Slack place, nothing to send, settings that don't parse, and a
+post Slack refuses with an HTTP 4xx or an error code about the post (`channel_not_found`, `not_in_channel`,
+`is_archived`, `missing_scope`, `invalid_auth`, …: any code that isn't Slack's own trouble). A rate limit, `fatal_error`/`internal_error`/
+`service_unavailable`/`request_timeout`, a 5xx, the network, and a secret the policy doesn't allow (yet) say no
+`permanent`. Run by
 anything but loom's piece dispatch (the runtime runs it by its bin name), it goes through `loom slack send …` so
 the piece's own settings apply.
 

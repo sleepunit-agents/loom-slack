@@ -3,7 +3,8 @@
 
     loom-slack run                         the intake (the piece's service): shadow or live, by SLACK_MODE
     loom-slack send --place P --agent A    the venue's `send` (the runtime runs it): the text on stdin, posted as
-                                           that agent's own bot; answers {ok, id?} or {ok: false, reason}. A place
+                                           that agent's own bot; answers {ok, id?} or {ok: false, reason,
+                                           permanent?} (permanent: no retry will ever post it). A place
                                            dm:<user id> opens that person's DM: one agent's message to a person
         … --describe                       the place's rules, for a body's start: {ok, guest: false, peer: false,
                                            venue, readers: [], notes: []} (Slack routes only tier 2 and up)
@@ -22,6 +23,7 @@ import os
 import signal
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 HERE = Path(os.path.realpath(__file__)).parent
@@ -164,15 +166,35 @@ def chunks(text, n=MAX_POST):
     return out
 
 
+# Slack's errors that are Slack's trouble, not the post's: worth another try. Every other code Slack answers a post
+# with (channel_not_found, not_in_channel, is_archived, missing_scope, invalid_auth, msg_too_long, …) is for good.
+FOR_NOW = {"fatal_error", "internal_error", "service_unavailable", "request_timeout", "ratelimited"}
+
+
+def refused_for_good(e):
+    """A post Slack refused that no retry will change: an error code not in FOR_NOW, or an HTTP 4xx. A rate limit,
+    a timeout, a 5xx or the network is for now."""
+    if isinstance(e, routing.SlackError):
+        return e.error not in FOR_NOW
+    return isinstance(e, urllib.error.HTTPError) and 400 <= e.code < 500 and e.code not in (408, 429)
+
+
 def send(cfg, argv, stdin=None, secrets=None, api_for=None):
+    """{ok, id?} | {ok: false, reason, permanent?}: the text on stdin, posted to the place as the agent's own app.
+    `permanent: true` is a refusal for good (agent-runtime.md, "Outbound"): the runtime doesn't retry it or keep it
+    for a body, it records it refused. A refusal that may pass later (a rate limit, Slack down, a secret the owner
+    hasn't allowed yet) says no `permanent`."""
     def answer(d):
         print(json.dumps(d))
         return 0 if d.get("ok") else 1
+
+    def never(reason):
+        return answer({"ok": False, "reason": reason, "permanent": True})
     try:
         place = argv[argv.index("--place") + 1]
         agent = argv[argv.index("--agent") + 1]
     except (ValueError, IndexError):
-        return answer({"ok": False, "reason": "usage: loom-slack send --place <place> --agent <agent>"})
+        return never("usage: loom-slack send --place <place> --agent <agent>")
     if "--describe" in argv:
         return answer(describe(cfg, agent, place))
     if "--status" in argv:
@@ -181,20 +203,20 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
         msgs = [argv[j + 1] for j, x in enumerate(argv) if x == "--message" and j + 1 < len(argv)]
         return answer(common.Presence(cfg["data"]).status(agent, place, state, msgs))
     if cfg["mode"] != "live":
-        return answer({"ok": False, "reason": "loom-slack is in shadow mode: it posts nothing"})
+        return never("loom-slack is in shadow mode: it posts nothing")
     kind, _, ident = place.partition(":")
     if kind not in ("dm", "group") or not ident.isalnum():
-        return answer({"ok": False, "reason": f"not a Slack place: {place[:80]}"})
+        return never(f"not a Slack place: {place[:80]}")
     name = cfg["bots"].get(agent)
     if not name:
-        return answer({"ok": False, "reason": f"no Slack bot for {agent}"})
+        return never(f"no Slack bot for {agent}")
     try:
         c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
     except common.SecretRefused as e:
         return answer({"ok": False, "reason": f"{agent}'s bot: {e}"})
     text = (stdin if stdin is not None else sys.stdin).read()
     if not text.strip():
-        return answer({"ok": False, "reason": "nothing to send"})
+        return never("nothing to send")
     api = (api_for or routing.Slack)(c["bot"])
     first = None
     try:
@@ -203,7 +225,8 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
             got = api.call("chat.postMessage", channel=channel, text=part)
             first = first or got.get("ts")
     except Exception as e:  # noqa: BLE001 - the runtime gets a reason, never a trace
-        return answer({"ok": False, "reason": f"Slack refused the post: {str(e)[:200] if isinstance(e, routing.SlackError) else type(e).__name__}"})
+        reason = f"Slack refused the post: {str(e)[:200] if isinstance(e, routing.SlackError) else type(e).__name__}"
+        return never(reason) if refused_for_good(e) else answer({"ok": False, "reason": reason})
     common.Presence(cfg["data"]).posted(agent, place)   # the reply is the acknowledgment: 👀 comes off
     return answer({"ok": True, **({"id": f"{channel}:{first}"} if first else {})})
 
@@ -252,8 +275,8 @@ def main(argv):
     try:
         cfg = config()
     except SystemExit as e:
-        if verb == "send":
-            print(json.dumps({"ok": False, "reason": str(e)}))
+        if verb == "send":   # its settings don't parse: no retry fixes that
+            print(json.dumps({"ok": False, "reason": str(e), "permanent": True}))
             return 1
         raise
     if verb == "run":

@@ -6,8 +6,11 @@ import importlib.util
 import io
 import json
 import unittest
+import unittest.mock
+import urllib.error
 from pathlib import Path
 
+from loomslack import routing
 from loomvenue import common
 from test.fixtures import FakeSlack
 
@@ -73,7 +76,7 @@ class Send(unittest.TestCase):
 
     def test_refusals_say_why_and_never_carry_a_token(self):
         _, ans = self.run_send(["--place", "dm:U1", "--agent", "bolt"], "x")
-        self.assertEqual(ans, {"ok": False, "reason": "no Slack bot for bolt"})
+        self.assertEqual(ans, {"ok": False, "reason": "no Slack bot for bolt", "permanent": True})
         _, ans = self.run_send(["--place", "channel:30", "--agent", "kit"], "x")
         self.assertFalse(ans["ok"])
         _, ans = self.run_send(["--place", "dm:U1", "--agent", "kit"], "x", secrets=FakeSecrets("SLACK_TEAM_ID=T1\n"))
@@ -82,6 +85,80 @@ class Send(unittest.TestCase):
         _, ans = self.run_send(["--place", "dm:U1", "--agent", "kit"], "x")
         self.assertFalse(ans["ok"])
         self.assertNotIn("xb", json.dumps(ans))
+
+
+class Failing:
+    """Slack answering every call with one failure."""
+    def __init__(self, error):
+        self.error = error
+
+    def call(self, method, **p):
+        raise self.error
+
+
+def http(code):
+    return urllib.error.HTTPError("https://slack.com/api/chat.postMessage", code, "x", {}, None)
+
+
+class Permanent(unittest.TestCase):
+    """`permanent: true` when no retry will ever post it (agent-runtime.md, "Outbound"): the runtime records it
+    refused, doesn't retry it and keeps nothing for a body. A refusal for now says no `permanent`."""
+
+    def setUp(self):
+        self.api = FakeSlack()
+        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}'})
+
+    def ans(self, argv, text="x", cfg=None, secrets=None, api=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.send(cfg or self.cfg, argv, stdin=io.StringIO(text), secrets=secrets or FakeSecrets(),
+                            api_for=lambda tok: api or self.api)
+        self.assertEqual(code, 1)
+        return json.loads(out.getvalue())
+
+    def test_shadow_no_bot_a_place_that_isnt_slacks_and_nothing_to_send_are_for_good(self):
+        shadow = cli.config({"SLACK_BOTS": '{"kit": "kit-slack.env"}'})
+        for argv, text, cfg in ((["--place", "dm:U1", "--agent", "kit"], "x", shadow),
+                                (["--place", "dm:U1", "--agent", "bolt"], "x", None),
+                                (["--place", "channel:30", "--agent", "kit"], "x", None),
+                                (["--place", "dm:U-1", "--agent", "kit"], "x", None),
+                                (["--agent", "kit"], "x", None),
+                                (["--place", "dm:U1", "--agent", "kit"], "  \n", None)):
+            with self.subTest(argv=argv, shadow=cfg is shadow):
+                a = self.ans(argv, text, cfg)
+                self.assertIs(a["permanent"], True)
+                self.assertFalse(a["ok"])
+        self.assertEqual(self.api.calls, [])
+
+    def test_a_conversation_slack_wont_let_it_post_in_is_for_good(self):
+        for code in ("channel_not_found", "not_in_channel", "is_archived", "missing_scope", "invalid_auth",
+                     "cannot_dm_bot", "user_not_found"):
+            with self.subTest(code=code):
+                a = self.ans(["--place", "dm:U1", "--agent", "kit"],
+                             api=Failing(routing.SlackError(f"chat.postMessage: {code}", code)))
+                self.assertEqual(a, {"ok": False, "reason": f"Slack refused the post: chat.postMessage: {code}",
+                                     "permanent": True})
+        for code in (400, 403, 404):
+            with self.subTest(http=code):
+                self.assertIs(self.ans(["--place", "group:G1", "--agent", "kit"], api=Failing(http(code)))["permanent"], True)
+
+    def test_a_rate_limit_slacks_own_trouble_a_5xx_the_network_or_an_unallowed_secret_is_for_now(self):
+        for err in (routing.RateLimited(60), routing.SlackError("chat.postMessage: fatal_error"),
+                    routing.SlackError("chat.postMessage: internal_error", "internal_error"),
+                    routing.SlackError("chat.postMessage: service_unavailable", "service_unavailable"),
+                    routing.SlackError("chat.postMessage: request_timeout", "request_timeout"),
+                    http(408), http(500), http(503), urllib.error.URLError("down"), TimeoutError(), KeyError("channel")):
+            with self.subTest(err=repr(err)):
+                self.assertNotIn("permanent", self.ans(["--place", "dm:U1", "--agent", "kit"], api=Failing(err)))
+        self.assertNotIn("permanent", self.ans(["--place", "dm:U1", "--agent", "kit"], secrets=FakeSecrets(ok=False)))
+
+    def test_settings_that_dont_parse_are_for_good(self):
+        out = io.StringIO()
+        env = {"LOOM_PIECE_NAME": "slack", "SLACK_BOTS": "not json"}
+        with unittest.mock.patch.dict("os.environ", env, clear=True), contextlib.redirect_stdout(out):
+            code = cli.main(["send", "--place", "dm:U1", "--agent", "kit"])
+        self.assertEqual(code, 1)
+        self.assertIs(json.loads(out.getvalue())["permanent"], True)
 
 
 if __name__ == "__main__":
