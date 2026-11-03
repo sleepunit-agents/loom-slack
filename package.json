@@ -1,0 +1,74 @@
+{
+  "name": "loom-slack",
+  "version": "0.1.0",
+  "private": true,
+  "description": "loom's Slack venue adapter: each agent's own Slack app, its DMs and group DMs routed to the agent and handed to loom's deliver, and the agent's replies posted as that app",
+  "bin": {
+    "loom-slack": "bin/loom-slack"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s test -t ."
+  },
+  "license": "AGPL-3.0-or-later",
+  "loom": {
+    "name": "slack",
+    "role": "venue",
+    "label": "Slack",
+    "description": "Slack as a venue: each agent's own app; a DM or group DM is checked against Slack and the gates and delivered to the agent, and its replies post as that app.",
+    "settings": [
+      {
+        "name": "SLACK_MODE",
+        "label": "Mode",
+        "kind": "choice",
+        "options": [
+          { "value": "shadow", "label": "Shadow: read slowly, route and log, deliver nothing, post nothing" },
+          { "value": "live", "label": "Live: Socket Mode, deliver to loom, post replies" }
+        ],
+        "default": "shadow"
+      },
+      {
+        "name": "SLACK_BOTS",
+        "label": "Each agent's app",
+        "hint": "JSON: agent to the secret holding its app's env file (SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_TEAM_ID, SLACK_BOT_USER_ID), like {\"kit\": \"kit-slack.env\"}; the secrets piece's policy must allow that agent",
+        "required": true
+      },
+      {
+        "name": "SLACK_DATA",
+        "label": "Where its cursors and logs are kept",
+        "default": "${LOOM_PIECE_HOME}/data"
+      },
+      {
+        "name": "SLACK_POLL_S",
+        "label": "Seconds between ticks",
+        "hint": "default 65 in shadow (one history read per agent a tick), 5 live"
+      },
+      {
+        "name": "SLACK_TOKEN_FILE",
+        "label": "This piece's own token, to deliver with (live)",
+        "hint": "a file holding a piece token of this piece's (loom token create --piece slack/<name>)"
+      },
+      {
+        "name": "SLACK_LOOM_URL",
+        "label": "loom's address, as this machine reaches it",
+        "default": "http://127.0.0.1:8787"
+      },
+      {
+        "name": "SLACK_GATES_COMMAND",
+        "label": "How an agent's gates are read",
+        "hint": "a JSON argv printing {\"doc\": …}, {agent} filled in; default the runtime's [\"loom\", \"runtime\", \"gates\", \"people\", \"--agent\", \"{agent}\", \"--json\"]"
+      }
+    ],
+    "venues": {
+      "slack": { "label": "Slack", "kind": "live", "send": ["loom-slack", "send"] }
+    },
+    "services": [
+      { "name": "run", "argv": ["loom-slack", "run"] }
+    ]
+  }
+}

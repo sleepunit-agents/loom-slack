@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""loom-slack: loom's Slack venue adapter (loom docs/specs/agent-runtime.md, "The sources").
+
+    loom-slack run                         the intake (the piece's service): shadow or live, by SLACK_MODE
+    loom-slack send --place P --agent A    the venue's `send` (the runtime runs it): the text on stdin, posted as
+                                           that agent's own bot; answers {ok, id?} or {ok: false, reason}
+    loom-slack compare --start T --adapter GLOB --bridge GLOB [--hours 24] [--json]
+                                           the shadow window: this adapter's log against the old bridge's
+    loom-slack status [--json]             the mode, the agents, the log's size (no ids, no text)
+
+Shadow (the default): it receives (by reading the Web API slowly: no second socket) and routes, records nothing
+and posts nothing, and logs (message id, agent, place) for each message it would deliver. Live: Socket Mode, each
+routed message goes to loom's `deliver`, and `send` posts.
+"""
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(os.path.realpath(__file__)).parent
+sys.path.insert(0, str(HERE.parent / "lib"))
+
+from loomvenue import common  # noqa: E402
+from loomslack import adapter, routing  # noqa: E402
+
+PIECE = "slack"
+VENUE = "slack"
+MAX_POST = 3900
+ENV_KEYS = {"bot": "SLACK_BOT_TOKEN", "app": "SLACK_APP_TOKEN", "team": "SLACK_TEAM_ID", "bot_user": "SLACK_BOT_USER_ID"}
+
+
+def config(env=None):
+    env = os.environ if env is None else env
+    home = env.get("LOOM_PIECE_HOME") or str(Path.home() / ".local/state/loom-slack")
+    mode = common.mode_setting(env, "SLACK_MODE")
+    return {
+        "mode": mode,
+        "bots": common.bots_setting(env, "SLACK_BOTS"),
+        "data": common.setting(env, "SLACK_DATA", str(Path(home) / "data")),
+        "poll_s": float(common.setting(env, "SLACK_POLL_S", "65" if mode == "shadow" else "5")),
+        "gates": common.argv_setting(env, "SLACK_GATES_COMMAND",
+                                     ["loom", "runtime", "gates", "people", "--agent", "{agent}", "--json"]),
+        "may": common.argv_setting(env, "SLACK_SECRETS_MAY", ["loom", "secrets", "may", "{agent}", "{name}", "--json"]),
+        "get": common.argv_setting(env, "SLACK_SECRETS_GET", ["loom", "secrets", "get", "{name}", "--reveal"]),
+        "loom_url": common.setting(env, "SLACK_LOOM_URL", "http://127.0.0.1:8787"),
+        "token_file": common.setting(env, "SLACK_TOKEN_FILE"),
+    }
+
+
+def load_env(text):
+    """The bot's credentials: an env file (KEY=value lines), as the secret holds them."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def credentials(secrets, agent, name):
+    """{bot, app, team, bot_user} for an agent's app, or SecretRefused."""
+    env = load_env(secrets.get(agent, name))
+    missing = [v for k, v in ENV_KEYS.items() if k != "app" and not env.get(v)]
+    if missing:
+        raise common.SecretRefused(f"{name} has no {', '.join(missing)}")
+    return {k: env.get(v) for k, v in ENV_KEYS.items()}
+
+
+def under_loom(env=None):
+    return (os.environ if env is None else env).get("LOOM_PIECE_NAME") == PIECE
+
+
+def reexec_under_loom(argv):
+    loom = os.environ.get("LOOM_BIN") or "loom"
+    os.execvp(loom, [loom, PIECE, *argv])
+
+
+def make_sink(cfg):
+    deliverer = common.Deliverer(cfg["loom_url"], cfg["token_file"])
+
+    def sink(agent, body):
+        status, ans = deliverer.deliver(body)
+        if status == 200:
+            common.log(f"{agent}: delivered to {ans.get('conversation')} seq {ans.get('seq')}: {ans.get('body')}")
+            return True
+        if status in (400, 403, 409, 413):
+            common.log(f"{agent}: deliver REFUSED {status}: {str(ans.get('error'))[:200]}; not retried")
+            return True
+        common.log(f"{agent}: deliver: {status or 'no answer'} {str(ans.get('error'))[:200]}; tried again")
+        return False
+    return sink
+
+
+def run(cfg):
+    secrets = common.Secrets(cfg["may"], cfg["get"])
+    agents, app_tokens = {}, {}
+    for agent, name in sorted(cfg["bots"].items()):
+        try:
+            c = credentials(secrets, agent, name)
+        except common.SecretRefused as e:
+            common.log(f"{agent}: no bot: {e}")
+            continue
+        agents[agent] = adapter.Agent(agent, routing.Slack(c["bot"]), c["team"], c["bot_user"],
+                                      common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates"))
+        if c.get("app"):
+            app_tokens[agent] = c["app"]
+    if not agents:
+        common.log("no agent's bot could be read; nothing to read")
+        return 1
+    shadow = common.ShadowLog(cfg["data"], "slack")
+    if cfg["mode"] == "shadow":
+        intake = adapter.Poller(adapter.Router(cfg["data"], shadow), agents)
+    else:
+        if not cfg["token_file"]:
+            common.log("live mode needs SLACK_TOKEN_FILE (a piece token of this piece's, to deliver with)")
+            return 1
+        missing = sorted(set(agents) - set(app_tokens))
+        if missing:
+            common.log(f"live mode needs an app token (SLACK_APP_TOKEN) for {', '.join(missing)}")
+            return 1
+        intake = adapter.Socket(adapter.Router(cfg["data"], shadow, sink=make_sink(cfg)), agents, app_tokens)
+        intake.start()
+    stopping = []
+    signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
+    common.log(f"loom-slack: {cfg['mode']} for {', '.join(sorted(agents))}, every {cfg['poll_s']:g}s")
+    while not stopping:
+        started = time.time()
+        n = intake.tick()
+        if n:
+            common.log(f"{'would deliver' if cfg['mode'] == 'shadow' else 'delivered'} {n}")
+        end = time.time() + max(1.0, cfg["poll_s"] - (time.time() - started))
+        while time.time() < end and not stopping:
+            time.sleep(0.5)
+    if hasattr(intake, "stop"):
+        intake.stop()
+    return 0
+
+
+def chunks(text, n=MAX_POST):
+    out = []
+    while text:
+        if len(text) <= n:
+            out.append(text)
+            break
+        cut = text.rfind("\n", 0, n)
+        cut = cut if cut > n // 2 else n
+        out.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return out
+
+
+def send(cfg, argv, stdin=None, secrets=None, api_for=None):
+    def answer(d):
+        print(json.dumps(d))
+        return 0 if d.get("ok") else 1
+    try:
+        place = argv[argv.index("--place") + 1]
+        agent = argv[argv.index("--agent") + 1]
+    except (ValueError, IndexError):
+        return answer({"ok": False, "reason": "usage: loom-slack send --place <place> --agent <agent>"})
+    if cfg["mode"] != "live":
+        return answer({"ok": False, "reason": "loom-slack is in shadow mode: it posts nothing"})
+    kind, _, ident = place.partition(":")
+    if kind not in ("dm", "group") or not ident.isalnum():
+        return answer({"ok": False, "reason": f"not a Slack place: {place[:80]}"})
+    name = cfg["bots"].get(agent)
+    if not name:
+        return answer({"ok": False, "reason": f"no Slack bot for {agent}"})
+    try:
+        c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
+    except common.SecretRefused as e:
+        return answer({"ok": False, "reason": f"{agent}'s bot: {e}"})
+    text = (stdin if stdin is not None else sys.stdin).read()
+    if not text.strip():
+        return answer({"ok": False, "reason": "nothing to send"})
+    api = (api_for or routing.Slack)(c["bot"])
+    first = None
+    try:
+        channel = api.call("conversations.open", users=ident)["channel"]["id"] if kind == "dm" else ident
+        for part in chunks(text):
+            got = api.call("chat.postMessage", channel=channel, text=part)
+            first = first or got.get("ts")
+    except Exception as e:  # noqa: BLE001 - the runtime gets a reason, never a trace
+        return answer({"ok": False, "reason": f"Slack refused the post: {str(e)[:200] if isinstance(e, routing.SlackError) else type(e).__name__}"})
+    return answer({"ok": True, **({"id": f"{channel}:{first}"} if first else {})})
+
+
+def status(cfg, as_json):
+    p = Path(cfg["data"]) / common.ShadowLog.NAME
+    try:
+        n = sum(1 for _ in p.open())
+    except OSError:
+        n = 0
+    d = {"mode": cfg["mode"], "agents": sorted(cfg["bots"]), "shadow_lines": n}
+    print(json.dumps(d) if as_json else f"{d['mode']}: {', '.join(d['agents']) or 'no agents'}; {n} shadow lines")
+    return 0
+
+
+def main(argv):
+    verb = argv[0] if argv else ""
+    if verb in ("send", "run", "status") and not under_loom():
+        reexec_under_loom(argv)
+    if verb == "compare":
+        return common.compare_main(argv[1:], "slack")
+    try:
+        cfg = config()
+    except SystemExit as e:
+        if verb == "send":
+            print(json.dumps({"ok": False, "reason": str(e)}))
+            return 1
+        raise
+    if verb == "run":
+        return run(cfg)
+    if verb == "send":
+        return send(cfg, argv[1:])
+    if verb == "status":
+        return status(cfg, "--json" in argv)
+    sys.stderr.write(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
