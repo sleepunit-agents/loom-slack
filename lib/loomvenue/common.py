@@ -14,7 +14,8 @@ Here:
   - from_of: a delivery's `from`, a person card's slug or {kind: unknown};
   - ShadowLog: the routing log (the same line shuttle's bridges write, shuttle/shadowlog.py);
   - Deliverer: POST /api/loom/deliver with the piece's own token;
-  - compare: the two logs, matched by message id.
+  - compare: the two logs, matched by message id;
+  - Presence: what the runtime says of a body at work in a place (`send --status`), and the stop word (t-1756).
 
 Nothing here logs a message's text or a token. Text goes only into `deliver`, which puts it in loom's audit log
 (conversations.md, rule 4); a turn in core is metadata only.
@@ -396,3 +397,138 @@ def compare_main(argv, platform):
         for m in r["only_bridge"][:20]:
             print(f"  only the bridge: {m}")
     return {"agree": 0, "disagree": 1, "too-few": 3}[r["verdict"]]
+
+
+# ---------------------------------------------------------------- presence and the stop word (t-1756)
+
+PLACE = re.compile(r"^[a-z]{2,10}:[A-Za-z0-9]{1,40}$")
+STATUS_FRESH_S = 90      # a working body the runtime hasn't said again of in this long: shown no more
+STOP_RE = re.compile(r"^(stop|cancel)[.!]*$", re.IGNORECASE)
+
+
+def is_stop_text(text):
+    """A message that's only the stop word ("stop" or "cancel", a trailing ! or . allowed), its mentions aside."""
+    return bool(STOP_RE.match((text or "").strip()))
+
+
+class Presence:
+    """What the runtime says of a body at work in a place, for the run loop to show (loom-box delivery.mjs, presence).
+
+    The runtime runs the venue's declared send argv with `--place P --agent A --status working [--message ID]...`
+    when a message reaches a body, again every 15 s while it works, and `--status done` once its turn is over. That
+    short process only writes here; the run loop, which holds the bots, shows it (typing, 👀) and takes it down. The
+    run loop writes the other two: a stop (a person said the stop word in the place) and the agent's last post.
+
+        <data>/presence/<agent>/<kind>-<id>.json   {place, working, at, since, acks: [{id, at}]}
+        <data>/stops/<agent>/<kind>-<id>.json      {at, msg}
+        <data>/posted/<agent>/<kind>-<id>.json     {at}
+
+    Ids and times only: never a message's text."""
+
+    def __init__(self, data_dir, now=time.time):
+        self.dir, self.now = Path(data_dir), now
+
+    def _file(self, kind, agent, place):
+        if not AGENT.match(agent or "") or not PLACE.match(place or ""):
+            raise ValueError("not an agent and a place")
+        k, _, ident = place.partition(":")
+        return self.dir / kind / agent / f"{k}-{ident}.json"
+
+    def status(self, agent, place, state, messages=()):
+        """The runtime's word: {ok, stop?}. A stop said since this body started working there answers stop: true."""
+        if state not in ("working", "done"):
+            return {"ok": False, "reason": "--status is working or done"}
+        try:
+            f = self._file("presence", agent, place)
+        except ValueError as e:
+            return {"ok": False, "reason": str(e)}
+        rec = load_json(f, {}) or {}
+        now = self.now()
+        if state == "done":
+            if rec:
+                rec.update(working=False, at=now)
+                save_json(f, rec)
+            self._file("stops", agent, place).unlink(missing_ok=True)
+            return {"ok": True}
+        if not rec.get("working"):
+            rec = {"place": place, "working": True, "since": now, "acks": [a for a in rec.get("acks") or [] if isinstance(a, dict)]}
+        rec["at"] = now
+        have = {a.get("id") for a in rec["acks"]}
+        for m in messages:
+            if isinstance(m, str) and 0 < len(m) <= MAX_ID and m not in have:
+                rec["acks"].append({"id": m, "at": now})
+                have.add(m)
+        rec["acks"] = rec["acks"][-20:]
+        save_json(f, rec)
+        stop = load_json(self._file("stops", agent, place), None)
+        return {"ok": True, **({"stop": True} if isinstance(stop, dict) and stop.get("at", 0) >= rec.get("since", now) else {})}
+
+    def working(self, agent, place):
+        """Whether the runtime says a body of `agent` works in `place` now."""
+        try:
+            rec = load_json(self._file("presence", agent, place), {}) or {}
+        except ValueError:
+            return False
+        return bool(rec.get("working")) and self.now() - rec.get("at", 0) < STATUS_FRESH_S
+
+    def stop(self, agent, place, msg_id):
+        save_json(self._file("stops", agent, place), {"at": self.now(), "msg": str(msg_id)[:MAX_ID]})
+
+    def posted(self, agent, place):
+        try:
+            save_json(self._file("posted", agent, place), {"at": self.now()})
+        except (ValueError, OSError) as e:
+            log(f"presence: couldn't note a post ({type(e).__name__})")
+
+    def last_post(self, agent, place):
+        try:
+            return (load_json(self._file("posted", agent, place), {}) or {}).get("at", 0)
+        except ValueError:
+            return 0
+
+    def all(self):
+        """[(agent, place, record)] the runtime has said of."""
+        out = []
+        for f in sorted((self.dir / "presence").glob("*/*.json")):
+            rec = load_json(f, None)
+            if isinstance(rec, dict) and PLACE.match(str(rec.get("place") or "")) and AGENT.match(f.parent.name):
+                out.append((f.parent.name, rec["place"], rec))
+        return out
+
+    def clear(self, agent, place):
+        self._file("presence", agent, place).unlink(missing_ok=True)
+
+    def show(self, state, apis, react, typing=None):
+        """One pass of the run loop: for each place a body works in, 👀 on each message it took (`react(api, place,
+        msg, add)`), off once the agent has posted after it or the body is done; typing (`typing(api, place)`) while
+        it owes a reply. `state` is the run loop's own memory: {"<agent>|<place>": [msg ids reacted to]}."""
+        now = self.now()
+        seen = set()
+        for agent, place, rec in self.all():
+            api = apis.get(agent)
+            if api is None:
+                continue
+            key = f"{agent}|{place}"
+            seen.add(key)
+            reacted = state.setdefault(key, [])
+            live = bool(rec.get("working")) and now - rec.get("at", 0) < STATUS_FRESH_S
+            posted = self.last_post(agent, place)
+            owes = False
+            for a in rec.get("acks") or []:
+                mid = str(a.get("id") or "")
+                mid = mid.split(":", 1)[1] if mid.startswith(f"{agent}:") else mid
+                answered = posted >= a.get("at", now)
+                if (not live or answered) and mid in reacted:
+                    if react(api, place, mid, False):
+                        reacted.remove(mid)
+                elif live and not answered:
+                    owes = True
+                    if mid not in reacted and react(api, place, mid, True):
+                        reacted.append(mid)
+            if owes and typing is not None:
+                typing(api, place)
+            if not live and not reacted:
+                self.clear(agent, place)
+                state.pop(key, None)
+        for key in [k for k in state if k not in seen]:
+            state.pop(key, None)
