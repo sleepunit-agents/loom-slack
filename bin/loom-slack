@@ -10,8 +10,11 @@
                                            venue, readers: [], notes: []} (Slack routes only tier 2 and up)
         … --status working|done [--message ID]...   a body at work there (the runtime's word): live, the run loop
                                            puts 👀 on the message it took, off once it answers; {ok, stop?}
-    loom-slack compare --start T --adapter GLOB --bridge GLOB [--hours 24] [--json]
-                                           the shadow window: this adapter's log against the old bridge's
+    loom-slack compare --start T --adapter GLOB --bridge GLOB [--hours 24] [--json] [--check-gone]
+                                           the shadow window: this adapter's log against the old bridge's;
+                                           --check-gone asks Slack (as the agent's bot, metadata only) whether
+                                           each message only the bridge routed still exists: one deleted before
+                                           the shadow's late read is `gone`, listed and not counted
     loom-slack status [--json]             the mode, the agents, the log's size (no ids, no text)
 
 Shadow (the default): it receives (by reading the Web API slowly: no second socket) and routes, records nothing
@@ -255,6 +258,67 @@ def react(api, place, msg_id, add):
         return False
 
 
+def still_there(api, mid):
+    """Whether Slack still has message `<channel>:<ts>`: True, False (gone), or None (Slack didn't say). Reads ts
+    fields only: in the timeline (history at that ts), or in a thread (replies has its thread)."""
+    cid, _, ts = str(mid).partition(":")
+    if not (cid.isalnum() and ts):
+        return None
+    try:
+        d = api.call("conversations.history", channel=cid, oldest=ts, latest=ts, inclusive="true", limit="1")
+        if any(m.get("ts") == ts for m in d.get("messages", [])):
+            return True
+        cursor = None
+        for _ in range(50):                  # a thread's pages, oldest first
+            params = {"channel": cid, "ts": ts, "limit": "15", **({"cursor": cursor} if cursor else {})}
+            d = api.call("conversations.replies", **params)
+            if any(m.get("ts") == ts for m in d.get("messages", [])):
+                return True
+            cursor = (d.get("response_metadata") or {}).get("next_cursor") if d.get("has_more") else None
+            if not cursor:
+                return False
+        return None
+    except routing.RateLimited:
+        raise                                # the checker waits it out
+    except routing.SlackError as e:
+        if e.error in ("thread_not_found", "message_not_found"):
+            return False
+        return None
+    except Exception:  # noqa: BLE001 - can't tell: it stays only the bridge's
+        return None
+
+
+def gone_checker(cfg=None, secrets=None, api_for=None, sleep=time.sleep):
+    """compare's `gone`, as each agent's own bot. A rate limit waits (up to 70 s) and tries again, twice."""
+    def make():
+        c = cfg or config()
+        sec = secrets or common.Secrets(c["may"], c["get"])
+        apis = {}
+
+        def api(agent):
+            if agent not in apis:
+                creds = credentials(sec, agent, c["bots"][agent])
+                apis[agent] = (api_for or routing.Slack)(creds["bot"])
+            return apis[agent]
+
+        def gone(mid, pairs):
+            agents = [ag for ag, _ in pairs if ag in c["bots"]]
+            if not agents:
+                return None
+            for _ in range(3):
+                try:
+                    there = still_there(api(agents[0]), mid)
+                except routing.RateLimited as e:
+                    sleep(min(e.retry_after, 70))
+                    continue
+                except common.SecretRefused:
+                    return None
+                return None if there is None else not there
+            return None
+        return gone
+    return make
+
+
 def status(cfg, as_json):
     p = Path(cfg["data"]) / common.ShadowLog.NAME
     try:
@@ -268,10 +332,10 @@ def status(cfg, as_json):
 
 def main(argv):
     verb = argv[0] if argv else ""
-    if verb in ("send", "run", "status") and not under_loom():
-        reexec_under_loom(argv)
+    if (verb in ("send", "run", "status") or (verb == "compare" and "--check-gone" in argv)) and not under_loom():
+        reexec_under_loom(argv)          # the piece's settings and secrets: compare needs them only to ask Slack
     if verb == "compare":
-        return common.compare_main(argv[1:], "slack")
+        return common.compare_main(argv[1:], "slack", gone_checker=gone_checker())
     try:
         cfg = config()
     except SystemExit as e:
