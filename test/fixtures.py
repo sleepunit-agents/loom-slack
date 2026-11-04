@@ -9,11 +9,35 @@ USERS = {"U1": {"team_id": "T1"}, "U2": {"team_id": "T1"}, "U3": {"team_id": "T1
 
 
 class FakeSlack:
-    """The Web API as one bot: users, members, conversations and their history. Records every call."""
+    """The Web API as one bot: users, members, conversations, their history and their threads. Records every call.
 
-    def __init__(self, convs=None, history=None, members=None, fail=()):
+    `history` is each conversation's timeline (no replies, as Slack's); `replies` is {(conversation, parent ts):
+    [reply, …]}, and a parent in a history page carries `reply_count` and `latest_reply` from it, as Slack's does."""
+
+    def __init__(self, convs=None, history=None, members=None, fail=(), replies=None):
         self.convs, self.history, self.members, self.fail = convs or [], history or {}, members or {}, set(fail)
+        self.replies = replies or {}
         self.calls = []
+
+    def _window(self, msgs, p):
+        lo, hi, inc = float(p.get("oldest") or 0), p.get("latest"), p.get("inclusive") == "true"
+        out = [m for m in msgs if (float(m["ts"]) >= lo if inc else float(m["ts"]) > lo)]
+        if hi is not None:
+            out = [m for m in out if (float(m["ts"]) <= float(hi) if inc else float(m["ts"]) < float(hi))]
+        return out
+
+    def _with_thread(self, cid, m):
+        rs = self.replies.get((cid, m["ts"]))
+        return dict(m, reply_count=len(rs), latest_reply=max(rs, key=lambda r: float(r["ts"]))["ts"],
+                    thread_ts=m["ts"]) if rs else m
+
+    @staticmethod
+    def _page(msgs, p):
+        lim = int(p["limit"])
+        start = int(p.get("cursor") or 0)
+        page = msgs[start:start + lim]
+        more = start + lim < len(msgs)
+        return {"messages": page, "has_more": more, "response_metadata": {"next_cursor": str(start + lim) if more else ""}}
 
     def call(self, method, **p):
         from loomslack import routing
@@ -27,13 +51,23 @@ class FakeSlack:
         if method == "conversations.list":
             return {"channels": self.convs}
         if method == "conversations.history":
-            msgs = [m for m in self.history.get(p["channel"], []) if float(m["ts"]) > float(p["oldest"])]
-            msgs.sort(key=lambda m: -float(m["ts"]))
-            lim = int(p["limit"])
-            start = int(p.get("cursor") or 0)
-            page = msgs[start:start + lim]
-            more = start + lim < len(msgs)
-            return {"messages": page, "has_more": more, "response_metadata": {"next_cursor": str(start + lim) if more else ""}}
+            msgs = [self._with_thread(p["channel"], m) for m in self._window(self.history.get(p["channel"], []), p)]
+            msgs.sort(key=lambda m: -float(m["ts"]))       # newest first, as Slack's
+            return self._page(msgs, p)
+        if method == "conversations.replies":
+            cid, ts = p["channel"], p["ts"]
+            parent = next((m for m in self.history.get(cid, []) if m["ts"] == ts), None)
+            if parent is None:
+                for (c, pts), rs in self.replies.items():
+                    if c == cid and any(r["ts"] == ts for r in rs):
+                        parent = next((m for m in self.history.get(cid, []) if m["ts"] == pts), None)
+            if parent is None:
+                raise routing.SlackError("conversations.replies: thread_not_found")
+            rs = [dict(r, thread_ts=parent["ts"]) for r in self.replies.get((cid, parent["ts"]), [])]
+            rs = sorted(self._window(rs, p), key=lambda m: float(m["ts"]))   # oldest first, as Slack's
+            page = self._page(rs, p)
+            page["messages"] = [self._with_thread(cid, parent)] + page["messages"]   # the parent heads every page
+            return page
         if method == "conversations.open":
             return {"channel": {"id": "D" + p["users"]}}
         if method == "chat.postMessage":

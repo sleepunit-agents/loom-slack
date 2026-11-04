@@ -43,8 +43,11 @@ logs ids, counts and reasons, never text or a token. Files aren't fetched: a fil
   `websocket-client` (`python3-websocket`).
 - **Shadow** (the default): no socket. With two Socket Mode connections open, Slack sends each event to only one of
   them, so a shadow socket beside the live bridge would take messages from it. The shadow reads the Web API instead,
-  slowly: one `conversations.history` call per agent per tick (`SLACK_POLL_S`, 65 s), in turn over the bot's
-  conversations, paging until each is read. It delivers nothing and posts nothing (`send` answers `{ok: false}`), and
+  slowly: one read per agent per tick (`SLACK_POLL_S`, 65 s): `conversations.history`, in turn over the bot's
+  conversations, paging until each is read. History leaves out a reply in a thread (the socket gets it like any
+  message), so each history read also looks back a day for parents whose `latest_reply` is newer than what was read
+  of their thread, and a tick reads such a thread (`conversations.replies`) instead, every other tick at most. A
+  thread reply is routed like any message (live too: a reply in a DM thread is a `message.im`). It delivers nothing and posts nothing (`send` answers `{ok: false}`), and
   writes one line per message it would deliver to `<SLACK_DATA>/shadow-routes.jsonl`: `{at, platform, id, agent,
   place}`, the same line shuttle's bridges write. Then:
 
@@ -54,6 +57,9 @@ loom-slack compare --start 2026-11-03T00:00:00Z --adapter '<data>/shadow-routes.
 
 matches the two by message id: every message first seen in the window (less 10 minutes at each end) must have the
 same agents and places on both sides, and there must be at least 20. Exit 0 agree, 1 disagree, 3 too few.
+`--check-gone` asks Slack, as the agent's own bot and by ts alone, whether each message only the bridge routed is
+still there: one deleted before the shadow's late read is listed `gone` and counted neither way (the live socket
+gets a message as it's sent, so that's the shadow's blind spot, not a routing difference).
 
 ## Send
 

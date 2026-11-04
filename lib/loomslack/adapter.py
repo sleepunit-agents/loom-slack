@@ -6,9 +6,15 @@ loom's `deliver` (live).
     adapter dials out; each envelope is acked at once.
   - Shadow: the Web API, read slowly. Socket Mode can't run beside the old bridge: with two connections open,
     Slack sends each event to only one of them, so a shadow socket would take messages from the live bridge. So
-    the shadow polls `conversations.history`, one call per agent per `poll_s` (default 65 s, under the 1-a-minute
-    limit Slack puts on some apps), in turn over the bot's conversations, paging until each is read. It's late,
-    and for a comparison by message id that doesn't matter.
+    the shadow polls: one read per agent per `poll_s` (default 65 s, under the 1-a-minute limit Slack puts on some
+    apps). It's late, and for a comparison by message id that doesn't matter.
+
+**Thread replies (t-1825).** `conversations.history` leaves a reply in a thread out of the timeline; only
+`conversations.replies` on its thread has it, while the socket gets it like any other message. So a history read
+looks back THREAD_LOOKBACK_S past its cursor too, for parents only: one whose `latest_reply` is newer than what
+was read of its thread is due. A tick reads a due thread (`conversations.replies`, from where it was left) instead
+of a history page, at most every other tick, so history still gets at least half the reads and a tick still makes
+one. A reply is routed like any message; a thread is marked read only up to the replies it offered.
 
 A message is handled once per agent (a message id is its conversation and ts). A Slack check that fails ("wait")
 is tried again on later ticks for up to WAIT_TTL_S, then dropped, as the old bridge does.
@@ -23,6 +29,7 @@ WAIT_TTL_S = 3600
 HANDLED_KEEP_S = 2 * 86400
 LIST_EVERY_S = 600
 HISTORY_LIMIT = 15
+THREAD_LOOKBACK_S = 86400      # how far back a history read looks for a thread with new replies
 
 
 class Agent:
@@ -39,7 +46,7 @@ class Router:
         self.state_file = Path(data_dir) / "state.json"
         self.shadow, self.sink, self.now = shadow, sink, now
         self.state = common.load_json(self.state_file, {})
-        for k in ("handled", "waiting", "cache", "cursors", "convs"):
+        for k in ("handled", "waiting", "cache", "cursors", "convs", "threads"):
             self.state.setdefault(k, {})
 
     def save(self):
@@ -116,11 +123,13 @@ def slim(ev, keep_text):
 
 
 class Poller:
-    """The shadow intake: one `conversations.history` call per agent per tick, in turn over its conversations."""
+    """The shadow intake: one read per agent per tick, in turn over its conversations (`conversations.history`), or
+    a thread with replies not read yet (`conversations.replies`), every other tick at most."""
 
     def __init__(self, router, agents, now=time.time):
         self.router, self.agents, self.now = router, agents, now
         self.started = f"{now():.6f}"
+        self.last_replies = {}
 
     def conversations(self, a):
         convs = self.router.state["convs"].setdefault(a.agent, {"at": 0, "list": [], "next": 0})
@@ -152,7 +161,25 @@ class Poller:
         self.router.save()
         return n
 
+    def threads(self, a):
+        """This agent's threads: {"<conversation>|<parent ts>": {cid, group, parent, seen, at, due, page?}};
+        `seen` is the newest reply offered (or where reading starts), `due` that Slack has a newer one."""
+        th = self.router.state["threads"].setdefault(a.agent, {})
+        cut = self.now() - 2 * THREAD_LOOKBACK_S
+        for k in [k for k, t in th.items() if not t.get("due") and t.get("at", 0) < cut]:
+            th.pop(k)
+        return th
+
     def agent_tick(self, a):
+        th = self.threads(a)
+        due = sorted((t for t in th.values() if t.get("due")), key=lambda t: t.get("at", 0))
+        if due and not self.last_replies.get(a.agent):
+            self.last_replies[a.agent] = True
+            return self.replies_tick(a, th, due[0])
+        self.last_replies[a.agent] = False
+        return self.history_tick(a, th)
+
+    def history_tick(self, a, th):
         convs = self.conversations(a)
         if not convs["list"]:
             return 0
@@ -160,13 +187,18 @@ class Poller:
         i = convs.get("next", 0) % len(convs["list"])
         c = convs["list"][i]
         cur = cursors.setdefault(c["id"], {"oldest": self.started})
-        params = {"channel": c["id"], "oldest": cur["oldest"], "inclusive": "false", "limit": str(HISTORY_LIMIT)}
+        cur.setdefault("since", cur["oldest"])           # nothing from before this conversation was first read
+        look = min(float(cur["oldest"]), self.now() - THREAD_LOOKBACK_S)
+        params = {"channel": c["id"], "oldest": f"{look:.6f}", "inclusive": "false", "limit": str(HISTORY_LIMIT)}
         if cur.get("page"):
             params["cursor"] = cur["page"]
         d = a.api.call("conversations.history", **params)
         msgs = sorted(d.get("messages", []), key=lambda m: float(m.get("ts", 0)))
         n = 0
         for m in msgs:
+            self.note_thread(th, c, cur, m)
+            if float(m["ts"]) <= float(cur["oldest"]):
+                continue                      # read on an earlier lap: looked at for its thread only
             if self.router.offer(a, c["id"], c["group"], m) == "routed":
                 n += 1
             cur["newest"] = max(float(cur.get("newest", 0)), float(m["ts"]))
@@ -178,6 +210,51 @@ class Poller:
             if cur.get("newest"):
                 cur["oldest"] = f"{cur.pop('newest'):.6f}"
             convs["next"] = i + 1
+        return n
+
+    def note_thread(self, th, c, cur, m):
+        """A parent in a history page: due when Slack's newest reply is past what's been read of its thread."""
+        latest = m.get("latest_reply")
+        if not (m.get("reply_count") and latest and m.get("ts")):
+            return
+        key = f"{c['id']}|{m['ts']}"
+        t = th.get(key)
+        if t is None:
+            start = max(float(m["ts"]), float(cur["since"]))
+            t = th[key] = {"cid": c["id"], "group": c["group"], "parent": m["ts"], "seen": f"{start:.6f}",
+                           "at": float(m["ts"]), "due": False}
+        if float(latest) > float(t["seen"]):
+            t["due"] = True
+
+    def replies_tick(self, a, th, t):
+        key = f"{t['cid']}|{t['parent']}"
+        params = {"channel": t["cid"], "ts": t["parent"], "oldest": t["seen"], "inclusive": "false",
+                  "limit": str(HISTORY_LIMIT)}
+        if t.get("page"):
+            params["cursor"] = t["page"]
+        try:
+            d = a.api.call("conversations.replies", **params)
+        except routing.SlackError as e:
+            if e.error in ("thread_not_found", "channel_not_found", "message_not_found"):
+                th.pop(key, None)             # the thread is gone: nothing left in it to read
+                return 0
+            raise
+        msgs = sorted(d.get("messages", []), key=lambda m: float(m.get("ts", 0)))
+        n = 0
+        for m in msgs:
+            if m.get("ts") == t["parent"] or float(m.get("ts", 0)) <= float(t["seen"]):
+                continue                      # the parent comes with every page; it's history's to offer
+            if self.router.offer(a, t["cid"], t["group"], m) == "routed":
+                n += 1
+            t["newest"] = max(float(t.get("newest", 0)), float(m["ts"]))
+        nxt = (d.get("response_metadata") or {}).get("next_cursor") if d.get("has_more") else None
+        if nxt:
+            t["page"] = nxt                   # this thread again, on its next turn
+        else:
+            t.pop("page", None)
+            if t.get("newest"):
+                t["seen"] = f"{t.pop('newest'):.6f}"
+            t["due"] = False                  # a newer reply shows on the parent's next history read
         return n
 
 

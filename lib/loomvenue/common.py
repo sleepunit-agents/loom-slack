@@ -341,34 +341,40 @@ def read_logs(patterns, platform):
     return pairs, first
 
 
-def compare(adapter_logs, bridge_logs, platform, start, end, grace_s=600, min_messages=20):
+def compare(adapter_logs, bridge_logs, platform, start, end, grace_s=600, min_messages=20, gone=None):
     """Every message first seen (on either side) inside [start + grace, end - grace] must have the same set of
     (agent, place) on both sides. The grace keeps a message seen a moment before the window on one side from
-    counting as missing. Answers a report: verdict `agree` (and at least `min_messages`), `too-few`, or `disagree`."""
+    counting as missing. Answers a report: verdict `agree` (and at least `min_messages`), `too-few`, or `disagree`.
+
+    `gone(id, pairs)`, when given, is asked of each message only the bridge routed: True when the platform no
+    longer has it (deleted before a shadow that reads late could see it; the live socket gets it as it's sent).
+    Those are listed as `gone` and count neither way; False or None (couldn't tell) leaves it `only_bridge`."""
     a, af = read_logs(adapter_logs, platform)
     b, bf = read_logs(bridge_logs, platform)
     lo, hi = start + grace_s, end - grace_s
     ids = sorted(m for m in set(a) | set(b) if lo <= min(af.get(m, float("inf")), bf.get(m, float("inf"))) <= hi)
-    same, differ, only_a, only_b = [], [], [], []
+    same, differ, only_a, only_b, gone_ids = [], [], [], [], []
     for m in ids:
         if m not in b:
             only_a.append(m)
         elif m not in a:
-            only_b.append(m)
+            (gone_ids if gone is not None and gone(m, sorted(b[m])) is True else only_b).append(m)
         elif a[m] == b[m]:
             same.append(m)
         else:
             differ.append({"id": m, "adapter": sorted(a[m]), "bridge": sorted(b[m])})
     agree = not (differ or only_a or only_b)
     verdict = "disagree" if not agree else ("agree" if len(same) >= min_messages else "too-few")
-    return {"platform": platform, "window": [iso(start), iso(end)], "grace_s": grace_s, "messages": len(ids),
-            "same": len(same), "differ": differ, "only_adapter": only_a, "only_bridge": only_b,
-            "min_messages": min_messages, "verdict": verdict}
+    return {"platform": platform, "window": [iso(start), iso(end)], "grace_s": grace_s,
+            "messages": len(ids) - len(gone_ids), "same": len(same), "differ": differ, "only_adapter": only_a,
+            "only_bridge": only_b, "gone": gone_ids, "min_messages": min_messages, "verdict": verdict}
 
 
-def compare_main(argv, platform):
+def compare_main(argv, platform, gone_checker=None):
     """`loom-<venue> compare --start <iso|epoch> [--hours 24] --adapter <glob>... --bridge <glob>... [--json]`.
-    Exit 0 when the window agrees with at least 20 messages, 1 when it disagrees, 3 when there are too few."""
+    Exit 0 when the window agrees with at least 20 messages, 1 when it disagrees, 3 when there are too few.
+    `--check-gone` (a venue that passes `gone_checker`, a function making compare's `gone`) asks the platform
+    about each message only the bridge routed: metadata only, never its text."""
     import argparse
     p = argparse.ArgumentParser(prog=f"loom-{platform} compare")
     p.add_argument("--start", required=True, help="the window's start: ISO-8601 or epoch seconds")
@@ -378,24 +384,31 @@ def compare_main(argv, platform):
     p.add_argument("--grace", type=float, default=600.0, help="seconds left out at each end")
     p.add_argument("--min", type=int, default=20)
     p.add_argument("--json", action="store_true")
+    if gone_checker is not None:
+        p.add_argument("--check-gone", action="store_true",
+                       help="ask the platform whether each message only the bridge routed still exists")
     a = p.parse_args(argv)
     try:
         start = float(a.start)
     except ValueError:
         start = datetime.datetime.fromisoformat(a.start.replace("Z", "+00:00")).timestamp()
-    r = compare(a.adapter, a.bridge, platform, start, start + a.hours * 3600, a.grace, a.min)
+    gone = gone_checker() if gone_checker is not None and a.check_gone else None
+    r = compare(a.adapter, a.bridge, platform, start, start + a.hours * 3600, a.grace, a.min, gone=gone)
     if a.json:
         print(json.dumps(r, indent=1))
     else:
         print(f"{platform} {r['window'][0]} .. {r['window'][1]}: {r['messages']} messages, {r['same']} the same, "
               f"{len(r['differ'])} different, {len(r['only_adapter'])} only the adapter's, "
-              f"{len(r['only_bridge'])} only the bridge's: {r['verdict']}")
+              f"{len(r['only_bridge'])} only the bridge's"
+              + (f", {len(r['gone'])} gone from {platform} (not counted)" if r["gone"] else "") + f": {r['verdict']}")
         for d in r["differ"][:20]:
             print(f"  differ {d['id']}: adapter {d['adapter']} bridge {d['bridge']}")
         for m in r["only_adapter"][:20]:
             print(f"  only the adapter: {m}")
         for m in r["only_bridge"][:20]:
             print(f"  only the bridge: {m}")
+        for m in r["gone"][:20]:
+            print(f"  gone from {platform}: {m}")
     return {"agree": 0, "disagree": 1, "too-few": 3}[r["verdict"]]
 
 
