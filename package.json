@@ -49,6 +49,11 @@
         "hint": "default 65 in shadow (one history read per agent a tick), 5 live"
       },
       {
+        "name": "SLACK_THREAD_LOOKBACK_S",
+        "label": "How old a thread's parent can be and still be checked for new replies (shadow only)",
+        "hint": "default 2592000 (30 days); a parent older than this when its conversation is first read is never seen, so a reply on it is missed (live's socket has no such gap)"
+      },
+      {
         "name": "SLACK_TOKEN_FILE",
         "label": "This piece's own token, to deliver with (live)",
         "hint": "a file holding a piece token of this piece's (loom token create --piece slack/<name>)"

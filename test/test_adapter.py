@@ -37,9 +37,10 @@ class Intake(unittest.TestCase):
         p = self.dir / common.ShadowLog.NAME
         return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
-    def poller(self):
+    def poller(self, lookback_s=None):
+        kw = {} if lookback_s is None else {"lookback_s": lookback_s}
         return adapter.Poller(adapter.Router(self.dir, common.ShadowLog(self.dir, "slack", now=self.now), now=self.now),
-                              self.agents, now=self.now)
+                              self.agents, now=self.now, **kw)
 
     def test_shadow_logs_what_it_would_deliver_reads_only_and_keeps_no_text(self):
         p = self.poller()
@@ -127,6 +128,32 @@ class Intake(unittest.TestCase):
             p.tick()
         self.assertIn(f"D1:{T0 + 7000:.6f}", {x["id"] for x in self.log()})
         self.assertEqual(len(self.log()), 5, "the lookback offers nothing it had read already")
+
+    def test_a_thread_older_than_the_lookback_is_missed_but_a_wider_lookback_catches_it(self):
+        """t-1745 round 2: a parent older than lookback_s when its conversation is first read is never seen, so
+        a late reply on it is missed for good — unless lookback_s is wide enough to still cover that parent."""
+        old = ev(T0 + 1, "U1", "old")
+        self.api.history = {"D1": [old] + [ev(T0 + 10 + i, "U1", "x") for i in range(3)]}
+        p = self.poller(lookback_s=100)                 # too narrow to ever see a parent this old again
+        for _ in range(4):
+            p.tick()
+        self.t[0] = T0 + 7200
+        self.api.replies = {("D1", old["ts"]): [ev(T0 + 7000, "U1", "late reply")]}
+        for _ in range(6):
+            p.tick()
+        self.assertNotIn(f"D1:{T0 + 7000:.6f}", {x["id"] for x in self.log()}, "missed: the parent fell out of range")
+
+        self.t[0] = T0
+        self.api.history = {"D1": [old] + [ev(T0 + 10 + i, "U1", "x") for i in range(3)]}
+        self.api.replies = {}
+        p = self.poller(lookback_s=86400)                # wide enough to still reach this parent
+        for _ in range(4):
+            p.tick()
+        self.t[0] = T0 + 7200
+        self.api.replies = {("D1", old["ts"]): [ev(T0 + 7000, "U1", "late reply")]}
+        for _ in range(6):
+            p.tick()
+        self.assertIn(f"D1:{T0 + 7000:.6f}", {x["id"] for x in self.log()}, "found: lookback_s covers the parent")
 
     def test_replies_from_before_the_start_arent_offered_and_a_long_thread_pages(self):
         parent = ev(T0 - 100, "U1", "before")

@@ -50,6 +50,7 @@ def config(env=None):
         "bots": common.bots_setting(env, "SLACK_BOTS"),
         "data": common.setting(env, "SLACK_DATA", str(Path(home) / "data")),
         "poll_s": float(common.setting(env, "SLACK_POLL_S", "65" if mode == "shadow" else "5")),
+        "thread_lookback_s": float(common.setting(env, "SLACK_THREAD_LOOKBACK_S", str(adapter.THREAD_LOOKBACK_S))),
         "gates": common.argv_setting(env, "SLACK_GATES_COMMAND",
                                      ["loom", "runtime", "gates", "people", "--agent", "{agent}", "--json"]),
         "may": common.argv_setting(env, "SLACK_SECRETS_MAY", ["loom", "secrets", "may", "{agent}", "{name}", "--json"]),
@@ -123,7 +124,7 @@ def run(cfg):
         return 1
     shadow = common.ShadowLog(cfg["data"], "slack")
     if cfg["mode"] == "shadow":
-        intake = adapter.Poller(adapter.Router(cfg["data"], shadow), agents)
+        intake = adapter.Poller(adapter.Router(cfg["data"], shadow), agents, lookback_s=cfg["thread_lookback_s"])
     else:
         if not cfg["token_file"]:
             common.log("live mode needs SLACK_TOKEN_FILE (a piece token of this piece's, to deliver with)")
