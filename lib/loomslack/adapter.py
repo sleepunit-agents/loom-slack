@@ -16,6 +16,13 @@ was read of its thread is due. A tick reads a due thread (`conversations.replies
 of a history page, at most every other tick, so history still gets at least half the reads and a tick still makes
 one. A reply is routed like any message; a thread is marked read only up to the replies it offered.
 
+A parent older than THREAD_LOOKBACK_S when the shadow first reads its conversation is never seen at all (the
+history read's `oldest` never goes back further), so a reply landing on a thread that's been dormant longer than
+that is missed for good — this is a shadow-only gap (t-1745 round 2): live's socket gets the reply regardless of
+the thread's age, the same as the bridge's. `SLACK_THREAD_LOOKBACK_S` widens the window a dormant thread can still
+be caught in; the cost is one history call that must walk back that far once per conversation (cheap while a
+conversation's messages over that span stay under HISTORY_LIMIT, which is the common case for a DM).
+
 A message is handled once per agent (a message id is its conversation and ts). A Slack check that fails ("wait")
 is tried again on later ticks for up to WAIT_TTL_S, then dropped, as the old bridge does.
 """
@@ -29,7 +36,8 @@ WAIT_TTL_S = 3600
 HANDLED_KEEP_S = 2 * 86400
 LIST_EVERY_S = 600
 HISTORY_LIMIT = 15
-THREAD_LOOKBACK_S = 86400      # how far back a history read looks for a thread with new replies
+THREAD_LOOKBACK_S = 2592000    # how far back a history read looks for a thread with new replies (30 days; t-1745
+                                # round 2 found a dormant thread's parent 8 days old go unseen at 1 day's worth)
 
 
 class Agent:
@@ -126,8 +134,8 @@ class Poller:
     """The shadow intake: one read per agent per tick, in turn over its conversations (`conversations.history`), or
     a thread with replies not read yet (`conversations.replies`), every other tick at most."""
 
-    def __init__(self, router, agents, now=time.time):
-        self.router, self.agents, self.now = router, agents, now
+    def __init__(self, router, agents, now=time.time, lookback_s=THREAD_LOOKBACK_S):
+        self.router, self.agents, self.now, self.lookback_s = router, agents, now, lookback_s
         self.started = f"{now():.6f}"
         self.last_replies = {}
 
@@ -165,7 +173,7 @@ class Poller:
         """This agent's threads: {"<conversation>|<parent ts>": {cid, group, parent, seen, at, due, page?}};
         `seen` is the newest reply offered (or where reading starts), `due` that Slack has a newer one."""
         th = self.router.state["threads"].setdefault(a.agent, {})
-        cut = self.now() - 2 * THREAD_LOOKBACK_S
+        cut = self.now() - 2 * self.lookback_s
         for k in [k for k, t in th.items() if not t.get("due") and t.get("at", 0) < cut]:
             th.pop(k)
         return th
@@ -188,7 +196,7 @@ class Poller:
         c = convs["list"][i]
         cur = cursors.setdefault(c["id"], {"oldest": self.started})
         cur.setdefault("since", cur["oldest"])           # nothing from before this conversation was first read
-        look = min(float(cur["oldest"]), self.now() - THREAD_LOOKBACK_S)
+        look = min(float(cur["oldest"]), self.now() - self.lookback_s)
         params = {"channel": c["id"], "oldest": f"{look:.6f}", "inclusive": "false", "limit": str(HISTORY_LIMIT)}
         if cur.get("page"):
             params["cursor"] = cur["page"]
