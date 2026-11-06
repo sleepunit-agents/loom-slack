@@ -5,7 +5,8 @@ The same file ships in loom-discord and loom-slack: each is its own piece, so ne
 A venue adapter receives platform messages, routes each to an agent, and hands it to loom's `deliver`. It never
 starts a body and never names a harness: the runtime does that (agent-runtime.md, test 1). In **shadow** mode it
 receives and routes, records nothing and posts nothing, and logs `(platform message id, agent, place)` for each
-message it would deliver, so `compare` can match it against the old bridge's log by message id.
+message it would deliver, so `compare` can match it against the old bridge's log by message id, with what a local
+check of loom's deliver contract said of the body it would have sent (`contract`).
 
 Here:
   - settings: JSON-valued environment settings (loom sets a managed piece's settings as its environment);
@@ -229,8 +230,9 @@ def from_of(hit):
 # ---------------------------------------------------------------- the shadow log
 
 class ShadowLog:
-    """What the adapter would deliver: `{at, platform, id, agent, place}`, one line each, in `shadow-routes.jsonl`,
-    the same line shuttle's bridges write (shuttle/shadowlog.py). Metadata only. Capped like theirs."""
+    """What the adapter would deliver: `{at, platform, id, agent, place, contract?}`, one line each, in
+    `shadow-routes.jsonl`, the same line shuttle's bridges write (shuttle/shadowlog.py) plus `contract` (readers
+    ignore keys they don't know). Metadata only. Capped like theirs."""
 
     NAME = "shadow-routes.jsonl"
     MAX_BYTES = 8 * 1024 * 1024
@@ -292,13 +294,32 @@ class Deliverer:
             return 0, {"error": type(e).__name__}
 
 
+def len16(s):
+    """A string's length as loom counts it: JavaScript's `.length`, UTF-16 code units (an emoji is 2)."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def cap16(s, n):
+    """`s` cut to at most `n` UTF-16 code units, never through a character."""
+    if len16(s) <= n:
+        return s
+    out, used = [], 0
+    for ch in s:
+        w = 2 if ord(ch) > 0xFFFF else 1
+        if used + w > n:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out)
+
+
 def delivery(msg_id, agent, venue, place, label, frm, at, text):
     """A deliver body, checked against the contract's caps. `id` is the agent's own copy of the message
     (`<agent>:<platform id>`): one platform message addressed to two agents is two deliveries."""
-    body = {"id": f"{agent}:{msg_id}"[:MAX_ID], "agent": agent, "venue": venue, "place": place,
-            "from": frm, "kind": "message", "at": at, "text": (text or "(no text)")[:MAX_TEXT]}
+    body = {"id": cap16(f"{agent}:{msg_id}", MAX_ID), "agent": agent, "venue": venue, "place": place,
+            "from": frm, "kind": "message", "at": at, "text": cap16(text or "(no text)", MAX_TEXT)}
     if label:
-        body["label"] = label[:MAX_LABEL]
+        body["label"] = cap16(label, MAX_LABEL)
     return body
 
 
@@ -322,7 +343,10 @@ def iso(t):
             raise ValueError(f"not a time: {s[:40]!r}")
         frac = (m.group(3) or "")[:3].ljust(3, "0")
         off = "+00:00" if m.group(4) == "Z" else m.group(4)
-        dt = datetime.datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}.{frac}{off}").astimezone(_UTC)
+        try:
+            dt = datetime.datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}.{frac}{off}").astimezone(_UTC)
+        except OverflowError:
+            raise ValueError("not a time: out of range") from None
     else:
         try:
             d = decimal.Decimal(s if s is not None else repr(float(t)))
@@ -331,7 +355,10 @@ def iso(t):
         if not d.is_finite():
             raise ValueError("not a time")
         ms = int((d * 1000).to_integral_value(rounding=decimal.ROUND_FLOOR))
-        dt = datetime.datetime(1970, 1, 1, tzinfo=_UTC) + datetime.timedelta(milliseconds=ms)
+        try:
+            dt = datetime.datetime(1970, 1, 1, tzinfo=_UTC) + datetime.timedelta(milliseconds=ms)
+        except OverflowError:
+            raise ValueError("not a time: out of range") from None
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -339,10 +366,14 @@ def iso(t):
 
 # Copied from loom (github.com/sleepunit-agents/loom, main 720ead5, 2026-11-06), where core checks a delivery
 # before anything runs and answers 400 `bad-input: …` for what's wrong: src/delivery.ts `parseDeliver` (its keys,
-# id, agent, text, kind, local) and src/backends/conversations.ts `parseTurn` (venue, place, at, from, label), with
-# their constants (MAX_DELIVERY_ID 200, MAX_DELIVERY_TEXT 40,000, MAX_PLACE 200, MAX_LABEL 80). ISO_UTC is
-# conversations.ts's, character for character: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/ (JavaScript's `$`
-# is the end of the string; here it's fullmatch, since Python's `$` would also take a trailing newline).
+# id, text, kind, local) and src/backends/conversations.ts `parseTurn` (venue, place, at, from, label), with their
+# constants (DELIVER_KEYS, DELIVER_KINDS, MAX_DELIVERY_ID 200, MAX_DELIVERY_TEXT 40,000, MAX_PLACE 200, MAX_LABEL
+# 80; lengths are JavaScript's, UTF-16 units: len16). Two rules are the runtime's own parse, which core forwards to
+# and whose 400 it passes back (loom-box src/delivery.mjs `parseDelivery`): agent is an agent id, and a local wake
+# is from a schedule. The words are loom's, so a shadow mismatch can be looked up in loom's source.
+# test_deliver_contract's LoomSource test checks these against a loom checkout (LOOM_SRC). ISO_UTC is
+# conversations.ts's /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/; JavaScript's `$` is the end of the string,
+# so here it's used with fullmatch (Python's `$` would also take a trailing newline).
 ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z")
 DELIVER_KEYS = ("id", "agent", "venue", "place", "label", "from", "kind", "at", "text", "local")
 DELIVER_KINDS = ("message", "wake")
@@ -366,19 +397,23 @@ def contract_problems(body):
 
     def string(k, lo, hi):
         v = body.get(k)
-        return isinstance(v, str) and lo <= len(v) <= hi
+        return isinstance(v, str) and lo <= len16(v) <= hi
     if not string("id", 1, MAX_ID):
         out.append(f"id is required: the source's own id for the message, 1-{MAX_ID} characters")
     if not (isinstance(body.get("agent"), str) and AGENT.fullmatch(body["agent"])):
         out.append("agent is an agent id")
     if not string("text", 1, MAX_TEXT):
         out.append(f"text is required: the message, 1-{MAX_TEXT} characters")
-    if body.get("kind") not in DELIVER_KINDS:
+    if body.get("kind") == "note":
+        out.append("kind is message or wake: a note is the agent's own turn, which a source doesn't write")
+    elif body.get("kind") not in DELIVER_KINDS:
         out.append(f"kind is one of {', '.join(DELIVER_KINDS)}")
     if "local" in body and body["local"] is not True:
         out.append("local is true, or left out")
     if body.get("local") is True and (body.get("venue") != "wake" or body.get("kind") != "wake"):
         out.append("local is only for a wake, on venue wake")
+    elif body.get("local") is True and (body.get("from") or {}).get("kind") != "schedule":
+        out.append("local is only for a wake from a schedule, on venue wake")
     if not (isinstance(body.get("venue"), str) and VENUE_NAME.fullmatch(body["venue"])):
         out.append("venue is a venue name: lowercase letters, digits and dashes, at most 32")
     if not string("place", 1, MAX_PLACE):
@@ -426,39 +461,29 @@ def verdict(status, ans):
       - FINAL: loom refused this message for good, and no retry or update changes that: 403 (who may deliver what:
         a venue the piece doesn't declare, an agent that isn't the household's or isn't granted, a person's message
         from a piece that isn't the venue's adapter, a wake's body in the wrong place), 409 (the same id came with
-        another body) and 413 (too big). Also a 400 about the message's own text.
-      - HOLD: loom refused how this adapter wrote the request: any other 400 (core's `bad-input`: a time that isn't
-        ISO_UTC, an id, a key, a field's shape; or malformed JSON) and 415. That's a bug here, not the message's
-        fault: the same body is refused every time, and a fixed adapter would be taken. The message is held, not
-        marked done, the owner is alerted, and it's tried again once the adapter restarts (an update does).
+        another body) and 413 (over the route's 256 KB).
+      - HOLD: loom refused how this adapter wrote the request: every 400 (core's `bad-input: …` from parseDeliver,
+        `bad-input: malformed JSON` from the route, src/transport/http-server.ts `deliverApi`, or the runtime's own
+        parse) and 415 (the route's `unsupported-media-type`, http-server.ts). None of them is about who sent the
+        message or where: each is a field this adapter wrote (its time, id, keys, a length), and `delivery` keeps
+        every field within loom's limits, so a 400 means this code is wrong. The same body is refused every time;
+        a fixed adapter would be taken. So the message is held, not marked done, the owner is alerted, and it's
+        tried again once the adapter restarts (an update does). Not by loom's wording: a reworded refusal holds.
       - RETRY: anything else (no answer, 401, 429, 5xx): the next tick tries again."""
     if status == 200:
         return DONE
-    err = str((ans or {}).get("error") or "")
-    if status == 400:
-        return FINAL if _about_text(err) else HOLD
-    if status == 415:
+    if status in (400, 415):
         return HOLD
     if status in (403, 409, 413):
         return FINAL
     return RETRY
 
 
-def _about_text(err):
-    e = err.removeprefix("bad-input: ")
-    return e.startswith("text is ")
-
-
 # ---------------------------------------------------------------- the owner's alert command
 
 def alert_setting(env, name):
     """The owner's alert command, a JSON argv, or None (unset: the journal line is all)."""
-    v = json_setting(env, name, None)
-    if v is None:
-        return None
-    if not (isinstance(v, list) and v and all(isinstance(x, str) for x in v)):
-        raise SystemExit(f"{name} is a JSON list of strings (an argv)")
-    return v
+    return None if json_setting(env, name, None) is None else argv_setting(env, name, None)
 
 
 ALERT_SOURCE = re.compile(r"[a-z][a-z0-9-]{0,39}")
@@ -467,7 +492,7 @@ ALERT_FACT = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 class Alerter:
     """The owner's alert command (loom docs/specs/keeping-watch.md, "The alert path"): `argv` run detached, never
-    waited on, as `<source> --severity warn|bad --summary <one line> [--fact k=v]...`. Once per `key` in a process:
+    waited on, as `<source> --severity bad --summary <one line> [--fact k=v]...`. Once per `key` in a process:
     a condition (deliveries held, a shadow body loom wouldn't take) is one alert, not one per message. Each alert is
     also a journal line. Facts are ids, codes and loom's own words, never a message's text."""
 

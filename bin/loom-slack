@@ -15,7 +15,7 @@
                                            --check-gone asks Slack (as the agent's bot, metadata only) whether
                                            each message only the bridge routed still exists: one deleted before
                                            the shadow's late read is `gone`, listed and not counted
-    loom-slack status [--json]             the mode, the agents, the log's size (no ids, no text)
+    loom-slack status [--json]             the mode, the agents, the log's size, how many are held (no ids, no text)
 
 Shadow (the default): it receives (by reading the Web API slowly: no second socket) and routes, records nothing
 and posts nothing, and logs (message id, agent, place) for each message it would deliver. Live: Socket Mode, each

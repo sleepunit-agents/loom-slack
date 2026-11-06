@@ -7,6 +7,7 @@ body, against loom's own `at` rule, copied below from loom's source. (loom-disco
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -91,6 +92,129 @@ class Time(unittest.TestCase):
                 common.iso(bad)
 
 
+class Rules(unittest.TestCase):
+    """contract_problems, rule by rule: each field loom's deliver checks, broken one at a time, in loom's words."""
+
+    def good(self):
+        return common.delivery("D1:1793828004.242749", "kit", "slack", "dm:U1", "DM with Robin",
+                               {"kind": "person", "slug": "robin"}, common.iso("1793828004.242749"), "hi")
+
+    def problems(self, **change):
+        b = self.good()
+        for k, v in change.items():
+            if v is None:
+                b.pop(k, None)
+            else:
+                b[k] = v
+        return common.contract_problems(b)
+
+    def test_a_good_body(self):
+        self.assertEqual(common.contract_problems(self.good()), [])
+        self.assertEqual(self.problems(label=None), [])
+        for frm in ({"kind": "unknown"}, {"kind": "schedule"}, {"kind": "agent", "id": "bolt"}):
+            self.assertEqual(self.problems(**{"from": frm}), [], frm)
+
+    def test_each_rule(self):
+        cases = [
+            ({"extra": 1}, 'a delivery has no key "extra" (it has id, agent, venue, place, label, from, kind, at, text, local)'),
+            ({"id": ""}, "id is required: the source's own id for the message, 1-200 characters"),
+            ({"id": "x" * 201}, "id is required: the source's own id for the message, 1-200 characters"),
+            ({"agent": "Kit"}, "agent is an agent id"),
+            ({"agent": None}, "agent is an agent id"),
+            ({"text": ""}, "text is required: the message, 1-40000 characters"),
+            ({"text": "\U0001F600" * 20001}, "text is required: the message, 1-40000 characters"),   # 40,002 UTF-16 units
+            ({"kind": "note"}, "kind is message or wake: a note is the agent's own turn, which a source doesn't write"),
+            ({"kind": "reply"}, "kind is one of message, wake"),
+            ({"local": False}, "local is true, or left out"),
+            ({"local": True}, "local is only for a wake, on venue wake"),
+            ({"local": True, "venue": "wake", "kind": "wake"}, "local is only for a wake from a schedule, on venue wake"),
+            ({"venue": "Slack"}, "venue is a venue name: lowercase letters, digits and dashes, at most 32"),
+            ({"venue": "v" * 33}, "venue is a venue name: lowercase letters, digits and dashes, at most 32"),
+            ({"place": ""}, "place is 1-200 characters"),
+            ({"place": "p" * 201}, "place is 1-200 characters"),
+            ({"at": "2026-11-04T21:33:24.242749Z"}, "at is an ISO-8601 UTC time (…Z)"),
+            ({"at": "2026-11-04T21:33:24.242+00:00"}, "at is an ISO-8601 UTC time (…Z)"),
+            ({"at": "2026-13-04T21:33:24.242Z"}, "at is an ISO-8601 UTC time (…Z)"),
+            ({"at": None}, "at is an ISO-8601 UTC time (…Z)"),
+            ({"from": {"kind": "person"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
+            ({"from": {"kind": "unknown", "slug": "x"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
+            ({"from": {"kind": "person", "slug": "Robin"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
+            ({"label": ""}, "label is 1-80 printable characters"),
+            ({"label": "a\nb"}, "label is 1-80 printable characters"),
+            ({"label": "l" * 81}, "label is 1-80 printable characters"),
+        ]
+        for change, want in cases:
+            with self.subTest(change=change):
+                self.assertEqual(self.problems(**change), [want])
+
+    def test_delivery_keeps_within_looms_lengths(self):
+        b = common.delivery("1", "kit", "slack", "dm:U1", "\U0001F600" * 50, {"kind": "unknown"}, common.iso(1),
+                            "\U0001F600" * 30000)
+        self.assertEqual(common.len16(b["text"]), 40000)
+        self.assertEqual(common.len16(b["label"]), 80)
+        self.assertEqual(common.contract_problems(b), [])
+
+
+LOOM_SRC = os.environ.get("LOOM_SRC")
+LOOM_BOX_SRC = os.environ.get("LOOM_BOX_SRC")
+
+
+@unittest.skipUnless(LOOM_SRC, "LOOM_SRC (a loom checkout) unset: the copy isn't checked against loom's source")
+class LoomSource(unittest.TestCase):
+    """The copy in common against loom's own source, when a checkout is at hand (LOOM_SRC, and LOOM_BOX_SRC for the
+    runtime's two rules): the constants, ISO_UTC, the 400 and 415 the route gives, and every refusal's words."""
+
+    def src(self, root, rel):
+        return (Path(root) / rel).read_text()
+
+    def loom_words(self):
+        text = self.src(LOOM_SRC, "src/delivery.ts") + self.src(LOOM_SRC, "src/backends/conversations.ts")
+        text = text.replace("\\'", "'")     # a TypeScript '…doesn\'t…' literal
+        for k, v in {"${MAX_DELIVERY_ID}": "200", "${MAX_DELIVERY_TEXT}": "40000", "${MAX_PLACE}": "200",
+                     "${max}": "80", "${DELIVER_KINDS.join(', ')}": "message, wake",
+                     "${DELIVER_KEYS.join(', ')}": ", ".join(common.DELIVER_KEYS)}.items():
+            text = text.replace(k, v)
+        return text
+
+    def test_the_constants_and_iso_utc(self):
+        conv, dl = self.src(LOOM_SRC, "src/backends/conversations.ts"), self.src(LOOM_SRC, "src/delivery.ts")
+        self.assertIn("const ISO_UTC = /^" + common.ISO_UTC.pattern + "$/;", conv)
+        self.assertIn("const VENUE = /^" + common.VENUE_NAME.pattern + "$/;", conv)
+        self.assertIn("const PRINTABLE = /^" + common.PRINTABLE.pattern.replace("\\x", "\\x") + "$/;", conv)
+        self.assertIn(f"export const MAX_PLACE = {common.MAX_PLACE};", conv)
+        self.assertIn(f"export const MAX_LABEL = {common.MAX_LABEL};", conv)
+        self.assertIn(f"export const MAX_DELIVERY_ID = {common.MAX_ID};", dl)
+        self.assertIn(f"export const MAX_DELIVERY_TEXT = {common.MAX_TEXT:_};", dl)
+        self.assertIn("const DELIVER_KINDS: readonly DeliverKind[] = ['message', 'wake'];", dl)
+        self.assertIn("const DELIVER_KEYS = [" + ", ".join(f"'{k}'" for k in common.DELIVER_KEYS) + "] as const;", dl)
+
+    def test_the_route_holds_are_its_own(self):
+        route, dl = self.src(LOOM_SRC, "src/transport/http-server.ts"), self.src(LOOM_SRC, "src/delivery.ts")
+        self.assertIn("sendError(res, 400, 'bad-input: malformed JSON')", route)
+        self.assertIn("sendError(res, 415, 'unsupported-media-type: POST /api takes application/json')", route)
+        self.assertIn("if (typeof d === 'string') return refuse(400, `bad-input: ${d}`);", dl)
+
+    def test_every_refusal_is_in_looms_words(self):
+        words = self.loom_words()
+        rules = Rules()
+        core = [{"id": ""}, {"text": ""}, {"kind": "note"}, {"kind": "reply"}, {"local": False}, {"local": True},
+                {"venue": "Slack"}, {"place": ""}, {"at": None}, {"from": {"kind": "person"}}]
+        for change in core:
+            for p in rules.problems(**change):
+                with self.subTest(change=change):
+                    self.assertTrue(p in words, f"not in loom's source: {p}")
+        self.assertIn("a delivery has no key ${JSON.stringify(bad)} (it has", words)
+        # label's words come from parseTurn's shortString(v, max, what): `${what} is 1-${max} printable characters`
+        self.assertTrue("shortString(raw.label, MAX_LABEL, 'label')" in words)
+        self.assertTrue("${what} is 1-80 printable characters" in words)
+
+    @unittest.skipUnless(LOOM_BOX_SRC, "LOOM_BOX_SRC (a loom-box checkout) unset")
+    def test_the_runtimes_two_rules(self):
+        rt = self.src(LOOM_BOX_SRC, "src/delivery.mjs")
+        self.assertIn("fail('agent is an agent id')", rt)
+        self.assertIn("fail('local is only for a wake from a schedule, on venue wake')", rt)
+
+
 class Verdict(unittest.TestCase):
     """loom's deliver answers (src/delivery.ts; loom-box delivery.mjs's own, passed through by core)."""
 
@@ -100,6 +224,9 @@ class Verdict(unittest.TestCase):
                             (400, 'bad-input: a delivery has no key "extra" (it has id, agent, …)'),
                             (400, "bad-input: malformed JSON"),
                             (400, "at is an ISO-8601 time"),                  # the runtime's own parse
+                            (400, "bad-input: text is required: the message, 1-40000 characters"),
+                            (400, "text is 1-40000 characters"),
+                            (400, "bad-input: something loom says in words this adapter has never seen"),
                             (415, "unsupported-media-type: POST /api takes application/json")]:
             with self.subTest(err=err):
                 self.assertEqual(common.verdict(status, {"error": err}), common.HOLD)
@@ -109,9 +236,7 @@ class Verdict(unittest.TestCase):
                             (403, "forbidden: kit isn't one of this household's agents"),
                             (403, "forbidden: from {kind: person} comes only from a venue adapter on its own venue"),
                             (409, "conflict: kit:1 was already delivered with a different body"),
-                            (413, "oversized: a delivery is 256 KB at most"),
-                            (400, "bad-input: text is required: the message, 1-40000 characters"),
-                            (400, "text is 1-40000 characters")]:
+                            (413, "oversized: a delivery is 256 KB at most")]:
             with self.subTest(err=err):
                 self.assertEqual(common.verdict(status, {"error": err}), common.FINAL)
 
@@ -133,6 +258,7 @@ class Alerts(unittest.TestCase):
 
     def test_unset_is_the_journal_only(self):
         self.assertFalse(common.Alerter(None).alert("hold", "loom-slack", "bad", "held"))
+
 
 class FakeDeliverer:
     def __init__(self, status, ans):

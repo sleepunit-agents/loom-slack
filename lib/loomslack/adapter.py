@@ -57,7 +57,9 @@ class Agent:
 
 
 class Router:
-    """Routes a message for one agent: shadow logs it, live hands it to `sink(agent, body) -> bool`."""
+    """Routes a message for one agent: shadow logs it (and checks the body it would send), live hands it to
+    `sink(agent, body)`, which answers True (done: delivered, or refused for good), False (tried again) or
+    common.HOLD (held); HOLD is tested first (it's a truthy string)."""
 
     def __init__(self, data_dir, shadow, sink=None, now=time.time, alerter=None):
         self.state_file = Path(data_dir) / "state.json"
@@ -153,7 +155,10 @@ class Router:
             r = self.route(a, w["cid"], w["group"], w["ev"])
             if r == "held":
                 w["held"] = True
-            elif r not in ("wait", "retry"):
+            elif r in ("wait", "retry"):
+                if w.pop("held", None):
+                    w["since"] = self.now()   # no longer held, only waiting: its hour starts now
+            else:
                 self.state["waiting"].pop(key)
 
 
