@@ -296,7 +296,7 @@ class Deliverer:
 
 def len16(s):
     """A string's length as loom counts it: JavaScript's `.length`, UTF-16 code units (an emoji is 2)."""
-    return len(s.encode("utf-16-le")) // 2
+    return len(s.encode("utf-16-le", "surrogatepass")) // 2   # a lone surrogate is one unit, not an error
 
 
 def cap16(s, n):

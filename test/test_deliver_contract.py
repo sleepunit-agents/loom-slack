@@ -157,6 +157,10 @@ class Rules(unittest.TestCase):
                                                   common.iso(1), "hi"))
         self.assertEqual(common.contract_problems(b), [])
 
+    def test_a_lone_surrogate_is_counted_not_raised(self):
+        self.assertEqual(common.len16("a\ud800b"), 3)
+        self.assertEqual(common.contract_problems(dict(Rules().good(), text="\ud800")), [])
+
     def test_delivery_keeps_within_looms_lengths(self):
         b = common.delivery("1", "kit", "slack", "dm:U1", "\U0001F600" * 50, {"kind": "unknown"}, common.iso(1),
                             "\U0001F600" * 30000)
