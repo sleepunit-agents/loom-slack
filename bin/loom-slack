@@ -15,7 +15,7 @@
                                            --check-gone asks Slack (as the agent's bot, metadata only) whether
                                            each message only the bridge routed still exists: one deleted before
                                            the shadow's late read is `gone`, listed and not counted
-    loom-slack status [--json]             the mode, the agents, the log's size (no ids, no text)
+    loom-slack status [--json]             the mode, the agents, the log's size, how many are held (no ids, no text)
 
 Shadow (the default): it receives (by reading the Web API slowly: no second socket) and routes, records nothing
 and posts nothing, and logs (message id, agent, place) for each message it would deliver. Live: Socket Mode, each
@@ -57,6 +57,7 @@ def config(env=None):
         "get": common.argv_setting(env, "SLACK_SECRETS_GET", ["loom", "secrets", "get", "{name}", "--reveal"]),
         "loom_url": common.setting(env, "SLACK_LOOM_URL", "http://127.0.0.1:8787"),
         "token_file": common.setting(env, "SLACK_TOKEN_FILE"),
+        "alert": common.alert_setting(env, "SLACK_ALERT_COMMAND"),
     }
 
 
@@ -90,18 +91,32 @@ def reexec_under_loom(argv):
     os.execvp(loom, [loom, PIECE, *argv])
 
 
-def make_sink(cfg):
-    deliverer = common.Deliverer(cfg["loom_url"], cfg["token_file"])
+def make_sink(cfg, deliverer=None, alerter=None):
+    """The live sink: True (loom took it, or refused it for good), False (tried again), or common.HOLD (loom refused
+    how this adapter wrote it: held and alerted, tried again once the adapter restarts; common.verdict)."""
+    deliverer = deliverer or common.Deliverer(cfg["loom_url"], cfg["token_file"])
+    alerter = alerter or common.Alerter(cfg.get("alert"))
 
     def sink(agent, body):
         status, ans = deliverer.deliver(body)
-        if status == 200:
-            common.log(f"{agent}: delivered to {ans.get('conversation')} seq {ans.get('seq')}: {ans.get('body')}")
+        v = common.verdict(status, ans)
+        err = str(ans.get("error"))[:200]
+        mid = str(body.get("id", "")).split(":", 1)[-1]
+        if v == common.DONE:
+            common.log(f"{agent}: delivered {mid} to {ans.get('conversation')} seq {ans.get('seq')}: {ans.get('body')}")
             return True
-        if status in (400, 403, 409, 413):
-            common.log(f"{agent}: deliver REFUSED {status}: {str(ans.get('error'))[:200]}; not retried")
+        if v == common.FINAL:
+            common.log(f"{agent}: deliver {mid} REFUSED {status}: {err}; not retried")
             return True
-        common.log(f"{agent}: deliver: {status or 'no answer'} {str(ans.get('error'))[:200]}; tried again")
+        if v == common.HOLD:
+            common.log(f"{agent}: deliver {mid} HELD {status}: {err}; loom refused how this adapter wrote it: "
+                       "kept, and tried again once the adapter is updated (restarted)")
+            alerter.alert("hold", adapter.SOURCE, "bad",
+                          f"loom-slack: loom refused a delivery as malformed ({status}); messages are held, "
+                          "not lost, until the adapter is fixed and restarted",
+                          status=status, error=err, message=mid, agent=agent)
+            return common.HOLD
+        common.log(f"{agent}: deliver {mid}: {status or 'no answer'} {err}; tried again")
         return False
     return sink
 
@@ -123,8 +138,10 @@ def run(cfg):
         common.log("no agent's bot could be read; nothing to read")
         return 1
     shadow = common.ShadowLog(cfg["data"], "slack")
+    alerter = common.Alerter(cfg["alert"])
     if cfg["mode"] == "shadow":
-        intake = adapter.Poller(adapter.Router(cfg["data"], shadow), agents, lookback_s=cfg["thread_lookback_s"])
+        intake = adapter.Poller(adapter.Router(cfg["data"], shadow, alerter=alerter), agents,
+                                lookback_s=cfg["thread_lookback_s"])
     else:
         if not cfg["token_file"]:
             common.log("live mode needs SLACK_TOKEN_FILE (a piece token of this piece's, to deliver with)")
@@ -133,7 +150,8 @@ def run(cfg):
         if missing:
             common.log(f"live mode needs an app token (SLACK_APP_TOKEN) for {', '.join(missing)}")
             return 1
-        intake = adapter.Socket(adapter.Router(cfg["data"], shadow, sink=make_sink(cfg)), agents, app_tokens)
+        intake = adapter.Socket(adapter.Router(cfg["data"], shadow, sink=make_sink(cfg, alerter=alerter), alerter=alerter),
+                                agents, app_tokens)
         intake.start()
     stopping = []
     presence = common.Presence(cfg["data"])
@@ -326,8 +344,11 @@ def status(cfg, as_json):
         n = sum(1 for _ in p.open())
     except OSError:
         n = 0
-    d = {"mode": cfg["mode"], "agents": sorted(cfg["bots"]), "shadow_lines": n}
-    print(json.dumps(d) if as_json else f"{d['mode']}: {', '.join(d['agents']) or 'no agents'}; {n} shadow lines")
+    st = common.load_json(Path(cfg["data"]) / "state.json", {}) or {}
+    held = sum(1 for w in (st.get("waiting") or {}).values() if isinstance(w, dict) and w.get("held"))
+    d = {"mode": cfg["mode"], "agents": sorted(cfg["bots"]), "shadow_lines": n, "held": held}
+    print(json.dumps(d) if as_json else f"{d['mode']}: {', '.join(d['agents']) or 'no agents'}; {n} shadow lines; "
+          f"{held} held")
     return 0
 
 

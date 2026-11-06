@@ -13,4 +13,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # loom's deliver contract, as loom's main has it today: test_deliver_contract's LoomSource checks the copy in
+      # lib/loomvenue/common.py against it, so a change on loom's side turns this red instead of a live delivery.
+      - uses: actions/checkout@v4
+        with:
+          repository: sleepunit-agents/loom
+          path: .loom
+          sparse-checkout: src
+      - uses: actions/checkout@v4
+        with:
+          repository: sleepunit-agents/loom-box
+          path: .loom-box
+          sparse-checkout: src
       - run: python3 -m unittest discover -s test -t . -v
+        env:
+          LOOM_SRC: .loom
+          LOOM_BOX_SRC: .loom-box
