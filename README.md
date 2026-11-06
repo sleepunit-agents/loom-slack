@@ -48,7 +48,7 @@ CI checks it against loom's and loom-box's main (`test/test_deliver_contract.py`
 | 200 | delivered |
 | 403, 409, 413 | refused for good, about this message (who may deliver it: a venue or grant; the same id with another body; over 256 KB): marked done, not retried |
 | 400, 415 | **held**: loom refused how this adapter wrote the request (a time, an id, a key, a length; malformed JSON; the content type). Every field is this adapter's to get right, so whatever loom's words, it's a bug here. Not marked done, not sent again by this process, never timed out, and tried again once the adapter restarts (an update does); the owner's alert command hears it once |
-| no answer, 401, 429, 5xx | tried again |
+| anything else (no answer, 401, 404, 429, 5xx) | tried again, on the next tick |
 
 
 ## Two intakes

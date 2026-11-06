@@ -92,6 +92,37 @@ class Time(unittest.TestCase):
                 common.iso(bad)
 
 
+RULE_CASES = [   # one rule broken at a time, and loom's words for it
+    ({"extra": 1}, 'a delivery has no key "extra" (it has id, agent, venue, place, label, from, kind, at, text, local)'),
+    ({"id": ""}, "id is required: the source's own id for the message, 1-200 characters"),
+    ({"id": "x" * 201}, "id is required: the source's own id for the message, 1-200 characters"),
+    ({"agent": "Kit"}, "agent is an agent id"),
+    ({"agent": None}, "agent is an agent id"),
+    ({"text": ""}, "text is required: the message, 1-40000 characters"),
+    ({"text": "\U0001F600" * 20001}, "text is required: the message, 1-40000 characters"),   # 40,002 UTF-16 units
+    ({"kind": "note"}, "kind is message or wake: a note is the agent's own turn, which a source doesn't write"),
+    ({"kind": "reply"}, "kind is one of message, wake"),
+    ({"local": False}, "local is true, or left out"),
+    ({"local": True}, "local is only for a wake, on venue wake"),
+    ({"local": True, "venue": "wake", "kind": "wake"}, "local is only for a wake from a schedule, on venue wake"),
+    ({"venue": "Slack"}, "venue is a venue name: lowercase letters, digits and dashes, at most 32"),
+    ({"venue": "v" * 33}, "venue is a venue name: lowercase letters, digits and dashes, at most 32"),
+    ({"place": ""}, "place is 1-200 characters"),
+    ({"place": "p" * 201}, "place is 1-200 characters"),
+    ({"at": "2026-11-04T21:33:24.242749Z"}, "at is an ISO-8601 UTC time (…Z)"),
+    ({"at": "2026-11-04T21:33:24.242+00:00"}, "at is an ISO-8601 UTC time (…Z)"),
+    ({"at": "2026-13-04T21:33:24.242Z"}, "at is an ISO-8601 UTC time (…Z)"),
+    ({"at": None}, "at is an ISO-8601 UTC time (…Z)"),
+    ({"from": {"kind": "person"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
+    ({"from": {"kind": "unknown", "slug": "x"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
+    ({"from": {"kind": "person", "slug": "Robin"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
+    ({"label": ""}, "label is 1-80 printable characters"),
+    ({"label": "a\nb"}, "label is 1-80 printable characters"),
+    ({"label": "l" * 81}, "label is 1-80 printable characters"),
+    ({"from": "x"}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}"),
+]
+
+
 class Rules(unittest.TestCase):
     """contract_problems, rule by rule: each field loom's deliver checks, broken one at a time, in loom's words."""
 
@@ -115,37 +146,16 @@ class Rules(unittest.TestCase):
             self.assertEqual(self.problems(**{"from": frm}), [], frm)
 
     def test_each_rule(self):
-        cases = [
-            ({"extra": 1}, 'a delivery has no key "extra" (it has id, agent, venue, place, label, from, kind, at, text, local)'),
-            ({"id": ""}, "id is required: the source's own id for the message, 1-200 characters"),
-            ({"id": "x" * 201}, "id is required: the source's own id for the message, 1-200 characters"),
-            ({"agent": "Kit"}, "agent is an agent id"),
-            ({"agent": None}, "agent is an agent id"),
-            ({"text": ""}, "text is required: the message, 1-40000 characters"),
-            ({"text": "\U0001F600" * 20001}, "text is required: the message, 1-40000 characters"),   # 40,002 UTF-16 units
-            ({"kind": "note"}, "kind is message or wake: a note is the agent's own turn, which a source doesn't write"),
-            ({"kind": "reply"}, "kind is one of message, wake"),
-            ({"local": False}, "local is true, or left out"),
-            ({"local": True}, "local is only for a wake, on venue wake"),
-            ({"local": True, "venue": "wake", "kind": "wake"}, "local is only for a wake from a schedule, on venue wake"),
-            ({"venue": "Slack"}, "venue is a venue name: lowercase letters, digits and dashes, at most 32"),
-            ({"venue": "v" * 33}, "venue is a venue name: lowercase letters, digits and dashes, at most 32"),
-            ({"place": ""}, "place is 1-200 characters"),
-            ({"place": "p" * 201}, "place is 1-200 characters"),
-            ({"at": "2026-11-04T21:33:24.242749Z"}, "at is an ISO-8601 UTC time (…Z)"),
-            ({"at": "2026-11-04T21:33:24.242+00:00"}, "at is an ISO-8601 UTC time (…Z)"),
-            ({"at": "2026-13-04T21:33:24.242Z"}, "at is an ISO-8601 UTC time (…Z)"),
-            ({"at": None}, "at is an ISO-8601 UTC time (…Z)"),
-            ({"from": {"kind": "person"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
-            ({"from": {"kind": "unknown", "slug": "x"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
-            ({"from": {"kind": "person", "slug": "Robin"}}, "from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, with no other keys"),
-            ({"label": ""}, "label is 1-80 printable characters"),
-            ({"label": "a\nb"}, "label is 1-80 printable characters"),
-            ({"label": "l" * 81}, "label is 1-80 printable characters"),
-        ]
-        for change, want in cases:
+        for change, want in RULE_CASES:
             with self.subTest(change=change):
                 self.assertEqual(self.problems(**change), [want])
+
+    def test_a_label_is_made_printable(self):
+        b = common.delivery("1", "kit", "slack", "dm:U1", "DM with\tRo\nbin", {"kind": "unknown"}, common.iso(1), "hi")
+        self.assertEqual(b["label"], "DM with Ro bin")
+        self.assertNotIn("label", common.delivery("1", "kit", "slack", "dm:U1", "\n", {"kind": "unknown"},
+                                                  common.iso(1), "hi"))
+        self.assertEqual(common.contract_problems(b), [])
 
     def test_delivery_keeps_within_looms_lengths(self):
         b = common.delivery("1", "kit", "slack", "dm:U1", "\U0001F600" * 50, {"kind": "unknown"}, common.iso(1),
@@ -180,7 +190,9 @@ class LoomSource(unittest.TestCase):
         conv, dl = self.src(LOOM_SRC, "src/backends/conversations.ts"), self.src(LOOM_SRC, "src/delivery.ts")
         self.assertIn("const ISO_UTC = /^" + common.ISO_UTC.pattern + "$/;", conv)
         self.assertIn("const VENUE = /^" + common.VENUE_NAME.pattern + "$/;", conv)
-        self.assertIn("const PRINTABLE = /^" + common.PRINTABLE.pattern.replace("\\x", "\\x") + "$/;", conv)
+        self.assertIn("const PRINTABLE = /^" + common.PRINTABLE.pattern + "$/;", conv)
+        self.assertIn("const SLUG = /" + common.SLUG.pattern + "/;", conv)        # from {kind: person}'s slug
+        self.assertIn("const AGENT_ID = /" + common.AGENT.pattern + "/;", conv)   # from {kind: agent}'s id
         self.assertIn(f"export const MAX_PLACE = {common.MAX_PLACE};", conv)
         self.assertIn(f"export const MAX_LABEL = {common.MAX_LABEL};", conv)
         self.assertIn(f"export const MAX_DELIVERY_ID = {common.MAX_ID};", dl)
@@ -208,8 +220,49 @@ class LoomSource(unittest.TestCase):
         self.assertTrue("shortString(raw.label, MAX_LABEL, 'label')" in words)
         self.assertTrue("${what} is 1-80 printable characters" in words)
 
+    def test_every_400_loom_can_give_is_one_the_copy_gives(self):
+        """The converse: each refusal in parseDeliver, parseFrom, shortString and parseTurn is one contract_problems
+        says too, or is named below as one a delivery can't reach. A rule loom adds turns this red."""
+        import re as _re
+        srcs = {"src/delivery.ts": ["export function parseDeliver"],
+                "src/backends/conversations.ts": ["function shortString", "function parseFrom", "export function parseTurn"]}
+        loom = []
+        for rel, starts in srcs.items():
+            text = self.src(LOOM_SRC, rel)
+            for start in starts:
+                i = text.index(start)
+                body = text[i:text.index("\n}\n", i)]
+                for q, lit in _re.findall(r"(?:return |fail\()(['`])((?:\\.|(?!\1).)*)\1", body):
+                    loom.append(lit.replace("\\'", "'"))
+        unreachable = {   # loom's words a deliver body can't draw, and why
+            "agent is required: one of the household's agents": "the runtime's stricter 'agent is an agent id' covers it",
+            "a turn is a JSON object": "parseDeliver hands parseTurn an object it built",
+            "a turn carries no text: its words go to the audit log, never the record": "parseDeliver passes no text",
+            "a turn has no key ${JSON.stringify(bad)} (it has ${TURN_KEYS.join(', ')})": "parseDeliver passes known keys",
+            "kind is one of ${TURN_KINDS.join(', ')}": "parseDeliver's own kind check comes first",
+            "a ${kind} is the agent's own turn: from is {kind: agent, id: ${agent}}": "only reply, action, note",
+            "a ${kind} names its run: 1-${MAX_RUN} of letters, digits and . _ : @ -": "only reply, action, note",
+            "a ${kind} has an outcome: ${OUTCOMES.join(', ')}": "only reply, action, note",
+            "${k} is only on the agent's own turns (${AGENT_TURN_KINDS.join(', ')}), not a ${kind}": "parseDeliver passes no run",
+        }
+        ours = set()
+        for change, _ in RULE_CASES:
+            ours.update(Rules().problems(**change))
+        ours.update(common.contract_problems("x"))
+        ours.update(Rules().problems(**{"from": "x"}))
+        self.assertGreater(len(loom), 15, "found loom's refusals")
+        for lit in loom:
+            if lit in unreachable:
+                continue
+            pat = "".join(".+" if part.startswith("${") else _re.escape(part)
+                          for part in _re.split(r"(\$\{[^}]*\})", lit))
+            with self.subTest(loom=lit):
+                self.assertTrue(any(_re.fullmatch(pat, p) for p in ours), f"no rule here gives loom's: {lit}")
+
     @unittest.skipUnless(LOOM_BOX_SRC, "LOOM_BOX_SRC (a loom-box checkout) unset")
     def test_the_runtimes_two_rules(self):
+        self.assertIn("export const AGENT_NAME = /" + common.AGENT.pattern + "/;",
+                      self.src(LOOM_BOX_SRC, "src/state.mjs"))
         rt = self.src(LOOM_BOX_SRC, "src/delivery.mjs")
         self.assertIn("fail('agent is an agent id')", rt)
         self.assertIn("fail('local is only for a wake from a schedule, on venue wake')", rt)

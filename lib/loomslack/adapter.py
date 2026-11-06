@@ -105,7 +105,7 @@ class Router:
         body = common.delivery(mid, a.agent, "slack", place, routing.label_of(group, gate.people.get(ev.get("user"))),
                                frm, common.iso(ev["ts"]), routing.text_of(ev, gate.people))
         if self.sink is None:
-            self.shadow.routed(mid, a.agent, place, contract=self.check(a.agent, mid, body))
+            self.shadow.routed(mid, a.agent, place, contract=self.contract_check(a.agent, mid, body))
             self.note_handled(a.agent, mid)
             return "routed"
         key = f"{a.agent}|{mid}"
@@ -120,7 +120,7 @@ class Router:
         self.note_handled(a.agent, mid)
         return "routed"
 
-    def check(self, agent, mid, body):
+    def contract_check(self, agent, mid, body):
         """Shadow: the body live would send, checked against loom's deliver contract; nothing is sent. Answers the
         problems ([] when loom would take its shape); a mismatch is said once a process."""
         problems = common.contract_problems(body)
@@ -141,6 +141,8 @@ class Router:
             w.update({"agent": a.agent, "cid": cid, "group": group, "ev": slim(ev, keep_text=self.sink is not None)})
             if r == "held":
                 w["held"] = True
+            elif w.pop("held", None):
+                w["since"] = self.now()       # no longer held, only waiting: its hour starts now
         return r
 
     def retry_waiting(self, agents):

@@ -318,6 +318,7 @@ def delivery(msg_id, agent, venue, place, label, frm, at, text):
     (`<agent>:<platform id>`): one platform message addressed to two agents is two deliveries."""
     body = {"id": cap16(f"{agent}:{msg_id}", MAX_ID), "agent": agent, "venue": venue, "place": place,
             "from": frm, "kind": "message", "at": at, "text": cap16(text or "(no text)", MAX_TEXT)}
+    label = " ".join(re.sub(r"[\x00-\x1f\x7f]+", " ", label or "").split())   # loom's label is printable
     if label:
         body["label"] = cap16(label, MAX_LABEL)
     return body
@@ -421,7 +422,9 @@ def contract_problems(body):
     at = body.get("at")
     if not (isinstance(at, str) and ISO_UTC.fullmatch(at) and _parses(at)):
         out.append("at is an ISO-8601 UTC time (…Z)")
-    if not _from_ok(body.get("from")):
+    if not isinstance(body.get("from"), dict):
+        out.append("from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}")
+    elif not _from_ok(body.get("from")):
         out.append("from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, "
                    "with no other keys")
     if "label" in body and not (string("label", 1, MAX_LABEL) and PRINTABLE.fullmatch(body["label"])):
@@ -466,7 +469,7 @@ def verdict(status, ans):
         `bad-input: malformed JSON` from the route, src/transport/http-server.ts `deliverApi`, or the runtime's own
         parse) and 415 (the route's `unsupported-media-type`, http-server.ts). None of them is about who sent the
         message or where: each is a field this adapter wrote (its time, id, keys, a length), and `delivery` keeps
-        every field within loom's limits, so a 400 means this code is wrong. The same body is refused every time;
+        every field within loom's limits (lengths, a printable label), so a 400 means this code is wrong. The same body is refused every time;
         a fixed adapter would be taken. So the message is held, not marked done, the owner is alerted, and it's
         tried again once the adapter restarts (an update does). Not by loom's wording: a reworded refusal holds.
       - RETRY: anything else (no answer, 401, 429, 5xx): the next tick tries again."""
