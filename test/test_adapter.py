@@ -155,6 +155,24 @@ class Intake(unittest.TestCase):
             p.tick()
         self.assertIn(f"D1:{T0 + 7000:.6f}", {x["id"] for x in self.log()}, "found: lookback_s covers the parent")
 
+    def test_round_robin_moves_on_while_a_busy_conversations_lookback_walk_still_has_pages(self):
+        """t-1745 round 3: history_tick only moved to the next conversation once the current one's lookback
+        walk fully drained (`convs["next"]` held at `i` until `has_more` was false), so a conversation needing
+        many pages (busy enough, or with the wide 30-day default just old enough) starved every other
+        conversation's turn for as long as its walk took -- with that default, potentially forever. The
+        round-robin must give every conversation a turn each lap regardless; a conversation mid-walk resumes
+        it, from its own saved cursor, on its own next turn."""
+        p = self.poller(lookback_s=86400)
+        self.api.history = {"D1": [ev(T0 + i, "U1", "x") for i in range(50)],   # 4 pages (HISTORY_LIMIT=15)
+                            "G1": [ev(T0 + 1, "U2", "hi")]}
+        p.tick()                                          # D1's newest page: 3 more of its walk still to go
+        d1_reads = sum(1 for m, prm in self.api.calls if m == "conversations.history" and prm["channel"] == "D1")
+        self.assertEqual(d1_reads, 1)
+        self.assertNotIn(f"G1:{T0 + 1:.6f}", {x["id"] for x in self.log()}, "G1 hasn't had a turn yet")
+        p.tick()                                          # must move on to G1 now, not hold for D1's walk
+        self.assertIn(f"G1:{T0 + 1:.6f}", {x["id"] for x in self.log()},
+                     "G1 got its turn on the very next tick, without waiting for D1's 4-page walk to finish")
+
     def test_replies_from_before_the_start_arent_offered_and_a_long_thread_pages(self):
         parent = ev(T0 - 100, "U1", "before")
         self.api.history = {"D1": [parent]}

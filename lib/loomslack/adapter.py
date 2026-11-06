@@ -20,8 +20,16 @@ A parent older than THREAD_LOOKBACK_S when the shadow first reads its conversati
 history read's `oldest` never goes back further), so a reply landing on a thread that's been dormant longer than
 that is missed for good — this is a shadow-only gap (t-1745 round 2): live's socket gets the reply regardless of
 the thread's age, the same as the bridge's. `SLACK_THREAD_LOOKBACK_S` widens the window a dormant thread can still
-be caught in; the cost is one history call that must walk back that far once per conversation (cheap while a
-conversation's messages over that span stay under HISTORY_LIMIT, which is the common case for a DM).
+be caught in; a conversation with more messages over that span than HISTORY_LIMIT needs more than one page to walk
+it, each a tick's one read (`cur["page"]`, `cur["look"]` holding the walk's own `oldest` steady while it's under
+way).
+
+That page-by-page walk used to hold the round-robin itself hostage: `convs["next"]` only moved to the next
+conversation once the current one's walk fully drained, so a busy enough conversation (page count × poll_s longer
+than another conversation goes between messages) starved every other conversation's turn for as long as its walk
+took — with the 30-day default, long enough to never finish catching up (t-1745 round 3). `convs["next"]` now
+always moves on after one page; a conversation mid-walk simply resumes it, from its own saved cursor, on its own
+next turn, instead of taking everyone else's.
 
 A message is handled once per agent (a message id is its conversation and ts). A Slack check that fails ("wait")
 is tried again on later ticks for up to WAIT_TTL_S, then dropped, as the old bridge does.
@@ -240,7 +248,11 @@ class Poller:
         c = convs["list"][i]
         cur = cursors.setdefault(c["id"], {"oldest": self.started})
         cur.setdefault("since", cur["oldest"])           # nothing from before this conversation was first read
-        look = min(float(cur["oldest"]), self.now() - self.lookback_s)
+        if "look" in cur:
+            look = float(cur["look"])                    # continuing a page walk already under way: keep its
+        else:                                             # bound steady rather than recomputing it mid-walk
+            look = min(float(cur["oldest"]), self.now() - self.lookback_s)
+        cur["look"] = look
         params = {"channel": c["id"], "oldest": f"{look:.6f}", "inclusive": "false", "limit": str(HISTORY_LIMIT)}
         if cur.get("page"):
             params["cursor"] = cur["page"]
@@ -256,12 +268,15 @@ class Poller:
             cur["newest"] = max(float(cur.get("newest", 0)), float(m["ts"]))
         nxt = (d.get("response_metadata") or {}).get("next_cursor") if d.get("has_more") else None
         if nxt:
-            cur["page"] = nxt                 # the same conversation next tick, further back
+            cur["page"] = nxt                 # this conversation resumes here, on its own next turn
         else:
             cur.pop("page", None)
+            cur.pop("look", None)
             if cur.get("newest"):
                 cur["oldest"] = f"{cur.pop('newest'):.6f}"
-            convs["next"] = i + 1
+        convs["next"] = i + 1                 # always move on: a conversation's own pagination resumes on its
+                                               # own next turn: it never holds every other conversation's turn
+                                               # hostage until it fully drains (t-1745 round 3)
         return n
 
     def note_thread(self, th, c, cur, m):
