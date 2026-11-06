@@ -36,6 +36,19 @@ bot's agent's (bridges.md, rule 1). Who may reach the agent (`lib/loomslack/rout
 The text goes only to `deliver`, which puts it in loom's audit log; the turn in loom is metadata only. This piece
 logs ids, counts and reasons, never text or a token. Files aren't fetched: a file's name is in the text.
 
+**`at`** is the message's time as loom's deliver takes it: UTC, milliseconds, `Z` (`2026-11-06T16:34:58.881Z`),
+truncated, never rounded (`common.iso`). loom refuses anything else with a 400.
+
+**What loom's answer means** (`common.verdict`, from loom's `src/delivery.ts`):
+
+| Answer | The message |
+|---|---|
+| 200 | delivered |
+| 403, 409, 413, or a 400 about its text | refused for good, about this message (a venue or grant, the same id with another body, too big): marked done, not retried |
+| any other 400, or 415 | **held**: loom refused how this adapter wrote the request (a time, an id, a key). Not marked done, not sent again by this process, never timed out, and tried again once the adapter restarts (an update does); the owner's alert command hears it once |
+| no answer, 401, 429, 5xx | tried again |
+
+
 ## Two intakes
 
 - **Live** (`SLACK_MODE=live`): Socket Mode, as the bridge it replaces. Each app's socket is dialled out (nothing
@@ -49,7 +62,9 @@ logs ids, counts and reasons, never text or a token. Files aren't fetched: a fil
   of their thread, and a tick reads such a thread (`conversations.replies`) instead, every other tick at most. A
   thread reply is routed like any message (live too: a reply in a DM thread is a `message.im`). It delivers nothing and posts nothing (`send` answers `{ok: false}`), and
   writes one line per message it would deliver to `<SLACK_DATA>/shadow-routes.jsonl`: `{at, platform, id, agent,
-  place}`, the same line shuttle's bridges write. Then:
+  place, contract}`, the same line shuttle's bridges write, plus `contract`: the body live would send for it, checked
+  against loom's deliver contract here (`common.contract_problems`, nothing sent), `"ok"` or what loom would refuse.
+  A mismatch is also a journal line (`CONTRACT MISMATCH`) and one alert. Then:
 
 ```
 loom-slack compare --start 2026-11-03T00:00:00Z --adapter '<data>/shadow-routes.jsonl' --bridge '<bridge state>/shadow-routes.jsonl'
@@ -90,6 +105,7 @@ answers `allowed` does this piece read it (host-side, `get --reveal`). The value
 | `SLACK_POLL_S` | seconds between ticks (65 shadow, 5 live) |
 | `SLACK_TOKEN_FILE` | live: a piece token of this piece's, to deliver with (`loom token create --piece slack/<name>`) |
 | `SLACK_LOOM_URL` | loom's address (`http://127.0.0.1:8787`) |
+| `SLACK_ALERT_COMMAND` | the owner's alert command, a JSON argv (loom's keeping-watch.md): a held delivery, a shadow contract mismatch; unset, the journal only |
 | `SLACK_GATES_COMMAND` | a JSON argv printing `{"doc": …}`, `{agent}` filled in |
 
 ## What the runtime asks of a place, and a body at work

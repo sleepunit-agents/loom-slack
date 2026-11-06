@@ -64,6 +64,11 @@
         "default": "http://127.0.0.1:8787"
       },
       {
+        "name": "SLACK_ALERT_COMMAND",
+        "label": "The owner's alert command",
+        "hint": "a JSON argv run as <argv> loom-slack --severity bad --summary … (keeping-watch.md): a delivery loom refused as malformed, or a shadow body loom wouldn't take; unset, the journal only"
+      },
+      {
         "name": "SLACK_GATES_COMMAND",
         "label": "How an agent's gates are read",
         "hint": "a JSON argv printing {\"doc\": …}, {agent} filled in; default the runtime's [\"loom\", \"runtime\", \"gates\", \"people\", \"--agent\", \"{agent}\", \"--json\"]"

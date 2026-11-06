@@ -13,7 +13,10 @@ Here:
   - Gates: who a platform id is, from the runtime (`loom runtime gates people --agent a --json`), failing closed;
   - from_of: a delivery's `from`, a person card's slug or {kind: unknown};
   - ShadowLog: the routing log (the same line shuttle's bridges write, shuttle/shadowlog.py);
-  - Deliverer: POST /api/loom/deliver with the piece's own token;
+  - Deliverer: POST /api/loom/deliver with the piece's own token; `iso`, the time it takes;
+  - contract_problems: a deliver body checked against loom's own deliver contract, locally (the shadow's check);
+  - verdict: what a deliver answer means for the message (done, refused for good, held, or tried again);
+  - Alerter: the owner's alert command, once per condition;
   - compare: the two logs, matched by message id;
   - Presence: what the runtime says of a body at work in a place (`send --status`), and the stop word (t-1756).
 
@@ -21,6 +24,7 @@ Nothing here logs a message's text or a token. Text goes only into `deliver`, wh
 (conversations.md, rule 4); a turn in core is metadata only.
 """
 import datetime
+import decimal
 import glob
 import json
 import os
@@ -235,7 +239,9 @@ class ShadowLog:
         self.path = Path(data_dir) / self.NAME
         self.platform, self.now = platform, now
 
-    def routed(self, msg_id, agent, place):
+    def routed(self, msg_id, agent, place, contract=None):
+        """`contract`, when given, is what contract_problems said of the delivery it would have made: [] is "ok".
+        Problems are words about the body's shape, never its text."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -245,8 +251,11 @@ class ShadowLog:
             except FileNotFoundError:
                 pass
             with self.path.open("a") as f:
-                f.write(json.dumps({"at": round(self.now(), 3), "platform": self.platform, "id": str(msg_id),
-                                    "agent": agent, "place": place}, separators=(",", ":")) + "\n")
+                line = {"at": round(self.now(), 3), "platform": self.platform, "id": str(msg_id), "agent": agent,
+                        "place": place}
+                if contract is not None:
+                    line["contract"] = list(contract) or "ok"
+                f.write(json.dumps(line, separators=(",", ":")) + "\n")
             return True
         except OSError as e:
             log(f"shadow log: {e!r}")
@@ -293,8 +302,198 @@ def delivery(msg_id, agent, venue, place, label, frm, at, text):
     return body
 
 
-def iso(epoch):
-    return datetime.datetime.fromtimestamp(float(epoch), datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+_EPOCH = re.compile(r"\d{1,12}(\.\d+)?")
+_ISO_IN = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})")
+_UTC = datetime.timezone.utc
+
+
+def iso(t):
+    """A time as loom's deliver takes it (ISO_UTC): UTC, milliseconds, `Z`, like `2026-11-06T16:34:58.881Z`.
+
+    `t` is epoch seconds (a number, or a string such as Slack's ts `1793828004.242749`) or an ISO-8601 time with its
+    offset (Discord's `2026-11-06T16:34:58.881000+00:00`). The fraction is truncated to the millisecond, never
+    rounded, so a time never moves into the next second (or day). Anything else is a ValueError."""
+    if isinstance(t, bool) or t is None:
+        raise ValueError("not a time")
+    s = t.strip() if isinstance(t, str) else None
+    if s is not None and not _EPOCH.fullmatch(s):
+        m = _ISO_IN.fullmatch(s)
+        if not m:
+            raise ValueError(f"not a time: {s[:40]!r}")
+        frac = (m.group(3) or "")[:3].ljust(3, "0")
+        off = "+00:00" if m.group(4) == "Z" else m.group(4)
+        dt = datetime.datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}.{frac}{off}").astimezone(_UTC)
+    else:
+        try:
+            d = decimal.Decimal(s if s is not None else repr(float(t)))
+        except (decimal.InvalidOperation, TypeError, ValueError, OverflowError):
+            raise ValueError("not a time") from None
+        if not d.is_finite():
+            raise ValueError("not a time")
+        ms = int((d * 1000).to_integral_value(rounding=decimal.ROUND_FLOOR))
+        dt = datetime.datetime(1970, 1, 1, tzinfo=_UTC) + datetime.timedelta(milliseconds=ms)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+# ---------------------------------------------------------------- loom's deliver contract, checked here
+
+# Copied from loom (github.com/sleepunit-agents/loom, main 720ead5, 2026-11-06), where core checks a delivery
+# before anything runs and answers 400 `bad-input: …` for what's wrong: src/delivery.ts `parseDeliver` (its keys,
+# id, agent, text, kind, local) and src/backends/conversations.ts `parseTurn` (venue, place, at, from, label), with
+# their constants (MAX_DELIVERY_ID 200, MAX_DELIVERY_TEXT 40,000, MAX_PLACE 200, MAX_LABEL 80). ISO_UTC is
+# conversations.ts's, character for character: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/ (JavaScript's `$`
+# is the end of the string; here it's fullmatch, since Python's `$` would also take a trailing newline).
+ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z")
+DELIVER_KEYS = ("id", "agent", "venue", "place", "label", "from", "kind", "at", "text", "local")
+DELIVER_KINDS = ("message", "wake")
+VENUE_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
+PRINTABLE = re.compile(r"[^\x00-\x1f\x7f]+")
+MAX_PLACE = 200
+
+
+def contract_problems(body):
+    """What loom's deliver would refuse with a 400 in this body, in loom's words; [] when its shape is right.
+
+    A local check, nothing sent: the shadow runs it on every delivery it would have made, so a body loom can't take
+    shows up in a shadow window instead of on the first live message. Who may deliver what (a 403: the venue, the
+    grant) is core's to say and isn't checked here. Never quotes the text."""
+    if not isinstance(body, dict):
+        return ["a delivery is a JSON object"]
+    out = []
+    bad = [k for k in body if k not in DELIVER_KEYS]
+    if bad:
+        out.append(f"a delivery has no key {json.dumps(bad[0])} (it has {', '.join(DELIVER_KEYS)})")
+
+    def string(k, lo, hi):
+        v = body.get(k)
+        return isinstance(v, str) and lo <= len(v) <= hi
+    if not string("id", 1, MAX_ID):
+        out.append(f"id is required: the source's own id for the message, 1-{MAX_ID} characters")
+    if not (isinstance(body.get("agent"), str) and AGENT.fullmatch(body["agent"])):
+        out.append("agent is an agent id")
+    if not string("text", 1, MAX_TEXT):
+        out.append(f"text is required: the message, 1-{MAX_TEXT} characters")
+    if body.get("kind") not in DELIVER_KINDS:
+        out.append(f"kind is one of {', '.join(DELIVER_KINDS)}")
+    if "local" in body and body["local"] is not True:
+        out.append("local is true, or left out")
+    if body.get("local") is True and (body.get("venue") != "wake" or body.get("kind") != "wake"):
+        out.append("local is only for a wake, on venue wake")
+    if not (isinstance(body.get("venue"), str) and VENUE_NAME.fullmatch(body["venue"])):
+        out.append("venue is a venue name: lowercase letters, digits and dashes, at most 32")
+    if not string("place", 1, MAX_PLACE):
+        out.append(f"place is 1-{MAX_PLACE} characters")
+    at = body.get("at")
+    if not (isinstance(at, str) and ISO_UTC.fullmatch(at) and _parses(at)):
+        out.append("at is an ISO-8601 UTC time (…Z)")
+    if not _from_ok(body.get("from")):
+        out.append("from is {kind: person, slug}, {kind: agent, id}, {kind: schedule} or {kind: unknown}, "
+                   "with no other keys")
+    if "label" in body and not (string("label", 1, MAX_LABEL) and PRINTABLE.fullmatch(body["label"])):
+        out.append(f"label is 1-{MAX_LABEL} printable characters")
+    return out
+
+
+def _parses(at):
+    try:
+        datetime.datetime.fromisoformat(at[:-1] + "+00:00")
+        return True
+    except ValueError:
+        return False
+
+
+def _from_ok(v):
+    if not isinstance(v, dict):
+        return False
+    keys = sorted(v)
+    if v.get("kind") == "person" and keys == ["kind", "slug"]:
+        return isinstance(v["slug"], str) and bool(SLUG.fullmatch(v["slug"])) and len(v["slug"]) <= 80
+    if v.get("kind") == "agent" and keys == ["id", "kind"]:
+        return isinstance(v["id"], str) and bool(AGENT.fullmatch(v["id"]))
+    return v.get("kind") in ("schedule", "unknown") and keys == ["kind"]
+
+
+# ---------------------------------------------------------------- what a deliver answer means
+
+DONE, FINAL, HOLD, RETRY = "done", "final", "hold", "retry"
+
+
+def verdict(status, ans):
+    """What loom's answer to a delivery means for the message (loom src/delivery.ts, `deliver`, and loom-box's
+    delivery.mjs, whose own refusals core passes through):
+
+      - DONE: 200, loom took it.
+      - FINAL: loom refused this message for good, and no retry or update changes that: 403 (who may deliver what:
+        a venue the piece doesn't declare, an agent that isn't the household's or isn't granted, a person's message
+        from a piece that isn't the venue's adapter, a wake's body in the wrong place), 409 (the same id came with
+        another body) and 413 (too big). Also a 400 about the message's own text.
+      - HOLD: loom refused how this adapter wrote the request: any other 400 (core's `bad-input`: a time that isn't
+        ISO_UTC, an id, a key, a field's shape; or malformed JSON) and 415. That's a bug here, not the message's
+        fault: the same body is refused every time, and a fixed adapter would be taken. The message is held, not
+        marked done, the owner is alerted, and it's tried again once the adapter restarts (an update does).
+      - RETRY: anything else (no answer, 401, 429, 5xx): the next tick tries again."""
+    if status == 200:
+        return DONE
+    err = str((ans or {}).get("error") or "")
+    if status == 400:
+        return FINAL if _about_text(err) else HOLD
+    if status == 415:
+        return HOLD
+    if status in (403, 409, 413):
+        return FINAL
+    return RETRY
+
+
+def _about_text(err):
+    e = err.removeprefix("bad-input: ")
+    return e.startswith("text is ")
+
+
+# ---------------------------------------------------------------- the owner's alert command
+
+def alert_setting(env, name):
+    """The owner's alert command, a JSON argv, or None (unset: the journal line is all)."""
+    v = json_setting(env, name, None)
+    if v is None:
+        return None
+    if not (isinstance(v, list) and v and all(isinstance(x, str) for x in v)):
+        raise SystemExit(f"{name} is a JSON list of strings (an argv)")
+    return v
+
+
+ALERT_SOURCE = re.compile(r"[a-z][a-z0-9-]{0,39}")
+ALERT_FACT = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+
+
+class Alerter:
+    """The owner's alert command (loom docs/specs/keeping-watch.md, "The alert path"): `argv` run detached, never
+    waited on, as `<source> --severity warn|bad --summary <one line> [--fact k=v]...`. Once per `key` in a process:
+    a condition (deliveries held, a shadow body loom wouldn't take) is one alert, not one per message. Each alert is
+    also a journal line. Facts are ids, codes and loom's own words, never a message's text."""
+
+    def __init__(self, argv=None, popen=subprocess.Popen):
+        self.argv, self.popen, self.said = argv, popen, set()
+
+    def alert(self, key, source, severity, summary, **facts):
+        if key in self.said:
+            return False
+        self.said.add(key)
+        summary = " ".join(str(summary).split())[:200]
+        log(f"ALERT {source} ({severity}): {summary}")
+        if not self.argv or not ALERT_SOURCE.fullmatch(source):
+            return False
+        argv = [*self.argv, source, "--severity", severity, "--summary", summary]
+        for k, v in facts.items():
+            if ALERT_FACT.fullmatch(k):
+                argv += ["--fact", f"{k}={' '.join(str(v).split())[:300]}"]
+        env = {k: v for k, v in os.environ.items() if k != "LOOM_STORE_GRANT"}
+        try:
+            self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       start_new_session=True, env=env)
+            return True
+        except OSError as e:
+            log(f"the alert command didn't run ({type(e).__name__})")
+            return False
 
 
 # ---------------------------------------------------------------- state

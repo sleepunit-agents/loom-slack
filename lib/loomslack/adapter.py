@@ -25,6 +25,14 @@ conversation's messages over that span stay under HISTORY_LIMIT, which is the co
 
 A message is handled once per agent (a message id is its conversation and ts). A Slack check that fails ("wait")
 is tried again on later ticks for up to WAIT_TTL_S, then dropped, as the old bridge does.
+
+**Held (t-1909).** A delivery loom refuses as malformed (common.verdict's HOLD: a 400 about how this adapter wrote
+it) isn't handled and isn't dropped: it waits with its event, isn't sent again by this process, never times out,
+and the next process (an update restarts it) tries it again.
+
+**The shadow's contract check.** In shadow, each message it would deliver is also built into the body live would
+send and checked against loom's deliver contract (common.contract_problems), nothing sent: the shadow log's line
+carries `contract` ("ok", or what loom would refuse), and a mismatch is a journal line and one alert.
 """
 import time
 from pathlib import Path
@@ -36,6 +44,7 @@ WAIT_TTL_S = 3600
 HANDLED_KEEP_S = 2 * 86400
 LIST_EVERY_S = 600
 HISTORY_LIMIT = 15
+SOURCE = "loom-slack"          # the alert command's source
 THREAD_LOOKBACK_S = 2592000    # how far back a history read looks for a thread with new replies (30 days; t-1745
                                 # round 2 found a dormant thread's parent 8 days old go unseen at 1 day's worth)
 
@@ -50,9 +59,11 @@ class Agent:
 class Router:
     """Routes a message for one agent: shadow logs it, live hands it to `sink(agent, body) -> bool`."""
 
-    def __init__(self, data_dir, shadow, sink=None, now=time.time):
+    def __init__(self, data_dir, shadow, sink=None, now=time.time, alerter=None):
         self.state_file = Path(data_dir) / "state.json"
         self.shadow, self.sink, self.now = shadow, sink, now
+        self.alerter = alerter or common.Alerter()
+        self.held_now = set()       # "<agent>|<id>" held by this process: not sent again until it restarts
         self.state = common.load_json(self.state_file, {})
         for k in ("handled", "waiting", "cache", "cursors", "convs", "threads"):
             self.state.setdefault(k, {})
@@ -73,7 +84,8 @@ class Router:
         self.state["handled"] = {k: v for k, v in self.state["handled"].items() if v.get("at", 0) >= cut}
 
     def route(self, a, cid, group, ev):
-        """'routed' | 'handled' | 'wait' | 'drop' | 'retry' (live: loom didn't take it) for one message."""
+        """'routed' | 'handled' | 'wait' | 'drop' | 'retry' (live: loom didn't take it) | 'held' (live: loom refused
+        how this adapter wrote it) for one message."""
         if not routing.routable(ev, a.bot_user):
             return "drop"
         mid = routing.msg_id(cid, ev["ts"])
@@ -88,35 +100,60 @@ class Router:
         if verdict != "ok":
             return verdict
         place = routing.place_of(cid, ev.get("user"), group)
-        if self.sink is None:
-            self.shadow.routed(mid, a.agent, place)
-            self.note_handled(a.agent, mid)
-            return "routed"
         body = common.delivery(mid, a.agent, "slack", place, routing.label_of(group, gate.people.get(ev.get("user"))),
                                frm, common.iso(ev["ts"]), routing.text_of(ev, gate.people))
-        if not self.sink(a.agent, body):
+        if self.sink is None:
+            self.shadow.routed(mid, a.agent, place, contract=self.check(a.agent, mid, body))
+            self.note_handled(a.agent, mid)
+            return "routed"
+        key = f"{a.agent}|{mid}"
+        if key in self.held_now:
+            return "held"
+        r = self.sink(a.agent, body)
+        if r == common.HOLD:
+            self.held_now.add(key)
+            return "held"
+        if not r:
             return "retry"
         self.note_handled(a.agent, mid)
         return "routed"
+
+    def check(self, agent, mid, body):
+        """Shadow: the body live would send, checked against loom's deliver contract; nothing is sent. Answers the
+        problems ([] when loom would take its shape); a mismatch is said once a process."""
+        problems = common.contract_problems(body)
+        if problems:
+            common.log(f"{agent}: CONTRACT MISMATCH {mid}: {'; '.join(problems)[:300]}")
+            self.alerter.alert("contract", SOURCE, "bad",
+                               "loom-slack shadow: a delivery it would make doesn't match loom's deliver contract",
+                               message=mid, agent=agent, problems="; ".join(problems))
+        return problems
 
     def offer(self, a, cid, group, ev):
         """Route one message now; a "wait" or a "retry" is kept for later (its id and conversation only, in
         shadow; in live its event too, since nothing else holds it)."""
         r = self.route(a, cid, group, ev)
-        if r in ("wait", "retry"):
+        if r in ("wait", "retry", "held"):
             key = f"{a.agent}|{routing.msg_id(cid, ev['ts'])}"
             w = self.state["waiting"].setdefault(key, {"since": self.now()})
             w.update({"agent": a.agent, "cid": cid, "group": group, "ev": slim(ev, keep_text=self.sink is not None)})
+            if r == "held":
+                w["held"] = True
         return r
 
     def retry_waiting(self, agents):
         for key, w in list(self.state["waiting"].items()):
+            if key in self.held_now:
+                continue                      # held: tried again by the next process, never timed out
             a = agents.get(w.get("agent"))
-            if a is None or self.now() - w.get("since", 0) > WAIT_TTL_S:
+            if a is None or (not w.get("held") and self.now() - w.get("since", 0) > WAIT_TTL_S):
                 common.log(f"{w.get('agent')}: a message waited {WAIT_TTL_S}s for Slack or loom; dropped")
                 self.state["waiting"].pop(key)
                 continue
-            if self.route(a, w["cid"], w["group"], w["ev"]) not in ("wait", "retry"):
+            r = self.route(a, w["cid"], w["group"], w["ev"])
+            if r == "held":
+                w["held"] = True
+            elif r not in ("wait", "retry"):
                 self.state["waiting"].pop(key)
 
 
