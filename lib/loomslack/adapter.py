@@ -110,8 +110,11 @@ class Router:
         if verdict != "ok":
             return verdict
         place = routing.place_of(cid, ev.get("user"), group)
-        body = common.delivery(mid, a.agent, "slack", place, routing.label_of(group, gate.people.get(ev.get("user"))),
-                               frm, common.iso(ev["ts"]), routing.text_of(ev, gate.people))
+        grouped = routing.is_group(cid, group)
+        names, total = gate.member_names(cid) if grouped else (None, None)
+        label = routing.label_of(grouped, gate.people.get(ev.get("user")), names, total)
+        body = common.delivery(mid, a.agent, "slack", place, label, frm, common.iso(ev["ts"]),
+                               routing.text_of(ev, gate.people, a.bot_user, a.agent))
         if self.sink is None:
             self.shadow.routed(mid, a.agent, place, contract=self.contract_check(a.agent, mid, body))
             self.note_handled(a.agent, mid)
@@ -170,6 +173,11 @@ class Router:
                     w["since"] = self.now()   # no longer held, only waiting: its hour starts now
             else:
                 self.state["waiting"].pop(key)
+
+
+def cached(data_dir, agent):
+    """An agent's cached Slack answers (users.info, conversations.members) as the intake last saved them; read only."""
+    return ((common.load_json(Path(data_dir) / "state.json", {}) or {}).get("cache") or {}).get(agent) or {}
 
 
 def slim(ev, keep_text):

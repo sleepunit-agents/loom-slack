@@ -12,7 +12,7 @@ from pathlib import Path
 
 from loomslack import routing
 from loomvenue import common
-from test.fixtures import FakeSlack
+from test.fixtures import GATES, FakeSlack, gates_argv
 
 BIN = Path(__file__).resolve().parent.parent / "bin" / "loom-slack"
 loader = importlib.machinery.SourceFileLoader("loom_slack_bin", str(BIN))
@@ -36,9 +36,9 @@ class FakeSecrets:
 
 class Send(unittest.TestCase):
     def setUp(self):
-        self.api = FakeSlack()
+        self.api = FakeSlack(members={"G1": ["B0", "U1", "U2"]})
         self.tokens = []
-        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}'})
+        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}', "SLACK_GATES_COMMAND": gates_argv(GATES)})
 
     def run_send(self, argv, text, cfg=None, secrets=None):
         out = io.StringIO()
@@ -69,6 +69,27 @@ class Send(unittest.TestCase):
         self.assertTrue(ans["ok"] and ans["id"].startswith("DU1:"))
         self.assertEqual(self.tokens, ["xb"])
         self.assertEqual(self.posts(), [{"channel": "DU1", "text": "Yes, Thursday at 3."}])
+
+    def test_a_group_is_asked_again_before_every_post_and_a_changed_one_gets_nothing(self):
+        """Independent read (t-1745): a reply goes only to a group DM whose people the gates still all admit, as Slack
+        says now (never the intake's cache): a group that became a channel, or gained a guest or a stranger, is refused
+        for good; the gates unreadable is for now. Nothing is posted either way."""
+        self.assertEqual(self.run_send(["--place", "group:G1", "--agent", "kit"], "hi")[0], 0)
+        self.assertIn("conversations.info", [m for m, _ in self.api.calls])
+        for what, spoil, permanent in (("a channel now", lambda: self.api.not_mpim.add("G1"), True),
+                                       ("a guest joined", lambda: self.api.members["G1"].append("U3"), True),
+                                       ("a stranger joined", lambda: self.api.members["G1"].append("U4"), True)):
+            with self.subTest(what=what):
+                self.api = FakeSlack(members={"G1": ["B0", "U1", "U2"]})
+                spoil()
+                code, ans = self.run_send(["--place", "group:G1", "--agent", "kit"], "hi")
+                self.assertEqual((code, ans["ok"], ans.get("permanent", False)), (1, False, permanent), ans)
+                self.assertEqual(self.posts(), [])
+        self.api = FakeSlack(members={"G1": ["B0", "U1", "U2"]})
+        cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}', "SLACK_GATES_COMMAND": '["false"]'})
+        code, ans = self.run_send(["--place", "group:G1", "--agent", "kit"], "hi", cfg=cfg)
+        self.assertEqual((code, ans.get("permanent", False)), (1, False))
+        self.assertEqual(self.posts(), [])
 
     def test_a_group_posts_to_its_own_id_and_long_text_is_split(self):
         code, _ = self.run_send(["--place", "group:G1", "--agent", "kit"], "word\n" * 2000)
@@ -107,8 +128,8 @@ class Permanent(unittest.TestCase):
     refused, doesn't retry it and keeps nothing for a body. A refusal for now says no `permanent`."""
 
     def setUp(self):
-        self.api = FakeSlack()
-        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}'})
+        self.api = FakeSlack(members={"G1": ["B0", "U1", "U2"]})
+        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}', "SLACK_GATES_COMMAND": gates_argv(GATES)})
 
     def ans(self, argv, text="x", cfg=None, secrets=None, api=None):
         out = io.StringIO()

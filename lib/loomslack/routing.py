@@ -66,12 +66,38 @@ class RateLimited(Exception):
         self.retry_after = retry_after
 
 
+_CLAIMED_TWICE = set()
+
+
+def people_of(gates, team, agent="?"):
+    """{user id: (slug, record)} for this workspace, from the gates' people, without any id two people claim: who wrote
+    can't be told then, and a message must never come from the wrong card (one of them the owner's). Each such id is
+    logged once a process; its messages are left on read until the gates are fixed."""
+    out = common.index(gates, "slack", team, sections=("people",))
+    claims = {}
+    for slug, rec in ((gates or {}).get("people") or {}).items():
+        if not isinstance(slug, str) or slug.startswith("_") or not isinstance(rec, dict):
+            continue
+        ids = rec.get("slack")
+        ids = ids.get(team) if isinstance(ids, dict) else ids
+        for uid in [ids] if isinstance(ids, (str, int)) and not isinstance(ids, bool) else ids if isinstance(ids, list) else []:
+            if isinstance(uid, (str, int)) and not isinstance(uid, bool):
+                claims.setdefault(str(uid), set()).add(slug)
+    for uid, slugs in claims.items():
+        if len(slugs) > 1:
+            out.pop(uid, None)
+            if (agent, uid) not in _CLAIMED_TWICE:
+                _CLAIMED_TWICE.add((agent, uid))
+                common.log(f"{agent}: a Slack id is in the gates under {len(slugs)} people; it's nobody's until that's fixed")
+    return out
+
+
 class Gate:
     """One agent's gate on Slack: its bot, its workspace, its gates document, and Slack's own answers (cached)."""
 
     def __init__(self, agent, api, team, bot_user, gates, cache, now=time.time):
         self.agent, self.api, self.team, self.bot_user, self.now = agent, api, team, bot_user, now
-        self.people = common.index(gates, "slack", team, sections=("people",)) if isinstance(gates, dict) else {}
+        self.people = people_of(gates, team, agent) if isinstance(gates, dict) else {}
         self.cache = cache            # persisted: {"users": {uid: …}, "members": {cid: …}}
         self.cache.setdefault("users", {})
         self.cache.setdefault("members", {})
@@ -120,6 +146,13 @@ class Gate:
         self.cache["members"][cid] = {"at": self.now(), "uids": uids}
         return uids
 
+    def member_names(self, cid):
+        """(names, total): a group DM's people but the bot, as the members this gate last read (`admit` reads or
+        refreshes them just before), their gates names sorted, and how many there are, named or not."""
+        uids = [u for u in ((self.cache["members"].get(cid) or {}).get("uids") or []) if u != self.bot_user]
+        names = sorted(str(p[1]["name"]) for p in (self.people.get(u) for u in uids) if p and p[1].get("name"))
+        return names, len(uids)
+
     def group_gate(self, cid):
         uids = self.members(cid)
         if uids is None:
@@ -140,7 +173,7 @@ class Gate:
 
     def admit(self, cid, group, uid):
         """("ok", from) | ("wait", why) | ("drop", why) for a message in conversation `cid` from `uid`."""
-        if group or not str(cid).startswith("D"):
+        if is_group(cid, group):
             verdict, why = self.group_gate(cid)
             if verdict != "ok":
                 return verdict, why
@@ -165,7 +198,7 @@ def routable(ev, bot_user):
 
 def place_of(cid, uid, group):
     """conversations.md's place: a 1:1 DM by the person's user id, a group DM by its own id."""
-    return f"group:{cid}" if group or not str(cid).startswith("D") else f"dm:{uid}"
+    return f"group:{cid}" if is_group(cid, group) else f"dm:{uid}"
 
 
 def msg_id(cid, ts):
@@ -173,26 +206,48 @@ def msg_id(cid, ts):
     return f"{cid}:{ts}"
 
 
-def label_of(group, hit):
-    if group:
-        return "group DM"
-    return f"DM with {hit[1].get('name')}" if hit and hit[1].get("name") else "DM"
+def is_group(cid, group):
+    """A group DM, or anything that isn't a 1:1 DM (its id starts with D), even if the flag were lost: gated as a room."""
+    return bool(group) or not str(cid).startswith("D")
 
 
-def clean_text(text, people):
-    """Slack's markup made readable: a known person's mention as @name, any other as @someone, links as text."""
+def label_of(group, hit, names=None, total=None):
+    """The conversation's label: a DM by its person's name; a group DM by its people's names (the old bridge's), as
+    many as fit in loom's label, and how many more (`total` counts everyone in it but the bot, named or not)."""
+    if not group:
+        return f"DM with {hit[1].get('name')}" if hit and hit[1].get("name") else "DM"
+    names = list(names or [])
+    total = max(total or 0, len(names))
+    for n in range(len(names), 0, -1):
+        label = group_label(names[:n], total)
+        if common.len16(label) <= common.MAX_LABEL:
+            return label
+    return f"group DM with {total} people" if total else "group DM"
+
+
+def group_label(shown, total):
+    more = total - len(shown)
+    return f"group DM with {', '.join(shown)}" + (f" and {more} more" if more else "")
+
+
+def clean_text(text, people, bot_user=None, agent=None):
+    """Slack's markup made readable (the old bridge's clean_text): a known person's mention as @name, this bot's as
+    @<agent>, any other as @someone; links as text; and Slack's three escapes (&lt; &gt; &amp;) as the characters."""
     def mention(mo):
+        if bot_user and agent and mo.group(1) == bot_user:
+            return f"@{agent}"
         hit = people.get(mo.group(1))
         return f"@{hit[1].get('name')}" if hit and hit[1].get("name") else "@someone"
 
     def link(mo):
         return f"{mo.group(2)} ({mo.group(1)})" if mo.group(2) else mo.group(1)
     text = MENTION.sub(mention, text or "")
-    return LINK.sub(link, text)
+    text = LINK.sub(link, text)
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def text_of(ev, people):
-    text = clean_text(ev.get("text"), people)
+def text_of(ev, people, bot_user=None, agent=None):
+    text = clean_text(ev.get("text"), people, bot_user, agent)
     for f in ev.get("files", []) or []:
         text += f" [file: {f.get('name')}]"
     return text

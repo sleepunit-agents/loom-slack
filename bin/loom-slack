@@ -8,7 +8,8 @@
                                            shadow: refused only because this adapter is in shadow). A place
                                            dm:<user id> opens that person's DM: one agent's message to a person
         … --describe                       the place's rules, for a body's start: {ok, guest: false, peer: false,
-                                           venue, readers: [], notes: []} (Slack routes only tier 2 and up)
+                                           venue, readers: [], members, notes} (Slack routes only tier 2 and up;
+                                           members: who's in it, by slug; notes: scope and group-tier names)
         … --status working|done [--message ID]...   a body at work there (the runtime's word): live, the run loop
                                            puts 👀 on the message it took, off once it answers; {ok, stop?}
     loom-slack compare --start T --adapter GLOB --bridge GLOB [--hours 24] [--json] [--check-gone]
@@ -24,6 +25,7 @@ routed message goes to loom's `deliver`, and `send` posts.
 """
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -39,6 +41,7 @@ from loomslack import adapter, routing  # noqa: E402
 PIECE = "slack"
 VENUE = "slack"
 MAX_POST = 3900
+NOTE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")     # a note name, as the runtime takes one (loom-box policy.mjs)
 ENV_KEYS = {"bot": "SLACK_BOT_TOKEN", "app": "SLACK_APP_TOKEN", "team": "SLACK_TEAM_ID", "bot_user": "SLACK_BOT_USER_ID"}
 
 
@@ -219,7 +222,7 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
     except (ValueError, IndexError):
         return never("usage: loom-slack send --place <place> --agent <agent>")
     if "--describe" in argv:
-        return answer(describe(cfg, agent, place))
+        return answer(describe(cfg, agent, place, secrets=secrets, api_for=api_for))
     if "--status" in argv:
         i = argv.index("--status")
         state = argv[i + 1] if i + 1 < len(argv) else ""
@@ -229,20 +232,19 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
         # `shadow: true`: the runtime hands a DM it refused this way to the old bridge, which posts there until this
         # adapter is live (loom-box delivery.mjs LEGACY_SEND, t-1920); any other refusal for good stays refused.
         return answer({"ok": False, "reason": "loom-slack is in shadow mode: it posts nothing", "permanent": True, "shadow": True})
-    kind, _, ident = place.partition(":")
-    if kind not in ("dm", "group") or not ident.isalnum():
-        return never(f"not a Slack place: {place[:80]}")
-    name = cfg["bots"].get(agent)
-    if not name:
-        return never(f"no Slack bot for {agent}")
-    try:
-        c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
-    except common.SecretRefused as e:
-        return answer({"ok": False, "reason": f"{agent}'s bot: {e}"})
+    kind, ident, c, refused = place_bot(cfg, agent, place, secrets)
+    if refused:
+        return never(refused["reason"]) if refused["permanent"] else answer({"ok": False, "reason": refused["reason"]})
     text = (stdin if stdin is not None else sys.stdin).read()
     if not text.strip():
         return never("nothing to send")
     api = (api_for or routing.Slack)(c["bot"])
+    if kind == "group":
+        # A group's people are asked again before every post, never from a cache: a reply goes only to a group DM
+        # whose people the gates still all admit (it could have become a channel, or gained someone).
+        why, permanent = group_still_admitted(cfg, agent, ident, c, api)
+        if why:
+            return never(f"{place}: {why}") if permanent else answer({"ok": False, "reason": f"{place}: {why}"})
     first = None
     try:
         channel = api.call("conversations.open", users=ident)["channel"]["id"] if kind == "dm" else ident
@@ -256,14 +258,87 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
     return answer({"ok": True, **({"id": f"{channel}:{first}"} if first else {})})
 
 
-def describe(cfg, agent, place):
-    """A Slack place's rules: never a guest venue (Slack routes only tier 2 and up), never a peer venue."""
+def describe(cfg, agent, place, secrets=None, api_for=None):
+    """A Slack place's rules (the runtime's policy.mjs reads them before a body starts): never a guest venue (Slack
+    routes only tier 2 and up), never a peer venue; who's in it (`members`, slugs: the runtime gives each one's tier,
+    restriction and card from its own gates); and its `notes`, names the agent's policy maps to its own brief files
+    (t-1745, the old bridge's ext dm_extra and group briefs):
+
+      - a 1:1 DM with a tier-2 person: `project-<p>` for each of their gates' `projects`, `field-<p>` for each
+        `field` project with field sites (scopes are one person's: never a group's, and tier 3 needs none);
+      - a group DM: `group-tier-<the lowest tier in it>`, and `group-owner-present` when that's 2 and a tier 3 is in.
+
+    Who's let in is the intake's own gate (routing.Gate: Slack's users.info check and the gates at tier 2 and up, the
+    group's members), with the intake's cached answers while they're fresh (it never writes them back). Anyone it
+    wouldn't route, Slack or the gates not answering, or a person whose gates slug the runtime couldn't name, is
+    {ok: false}: no body starts there."""
+    kind, ident, c, refused = place_bot(cfg, agent, place, secrets)
+    if refused:
+        return {"ok": False, "reason": refused["reason"]}
+    gates = common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates").doc()
+    if gates is None:
+        return {"ok": False, "reason": f"{agent}'s gates can't be read"}
+    gate = routing.Gate(agent, (api_for or routing.Slack)(c["bot"]), c["team"], c["bot_user"], gates,
+                        adapter.cached(cfg["data"], agent))
+    base = {"ok": True, "guest": False, "peer": False, "venue": ident, "readers": []}
+    if kind == "dm":
+        verdict, hit = gate.person_gate(ident)
+        if verdict != "ok" or not common.SLUG.match(hit[0]) or not isinstance(hit[1].get("tier"), int):
+            return {"ok": False, "reason": f"{place}: not someone {agent} routes on Slack (tier 2 and up)"}
+        slug, rec = hit
+        notes = []
+        if rec["tier"] == 2:
+            projects = rec.get("projects")
+            projects = [projects] if isinstance(projects, str) else projects if isinstance(projects, list) else []
+            notes += [f"project-{p}" for p in projects if isinstance(p, str)]
+            field = rec.get("field") if isinstance(rec.get("field"), dict) else {}
+            notes += [f"field-{p}" for p, sites in field.items() if isinstance(p, str) and sites]
+        return {**base, "members": [slug], "notes": sorted({n for n in notes if NOTE.fullmatch(n)})}
+    verdict, why = gate.group_gate(ident)
+    if verdict != "ok":
+        return {"ok": False, "reason": f"{place}: {why}"}
+    members = [gate.people[uid] for uid in gate.members(ident) or [] if uid != c["bot_user"]]
+    if not all(common.SLUG.match(slug) for slug, _ in members):
+        return {"ok": False, "reason": f"{place}: someone in it has a gates slug the runtime can't name"}
+    lowest = min(rec["tier"] for _, rec in members)
+    notes = [f"group-tier-{lowest}"]
+    if lowest == 2 and any(rec["tier"] == 3 for _, rec in members):
+        notes.append("group-owner-present")
+    return {**base, "members": [slug for slug, _ in sorted(members, key=lambda m: str(m[1].get("name") or m[0]))],
+            "notes": sorted({n for n in notes if NOTE.fullmatch(n)})}
+
+
+def group_still_admitted(cfg, agent, cid, c, api):
+    """(None, _) when `cid` is still a group DM (conversations.info: is_mpim) whose every member the gates admit, asked
+    of Slack now (no cache); else (why, permanent): the gates or Slack not answering is for now, the rest for good."""
+    gates = common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates").doc()
+    if gates is None:
+        return "the gates can't be read", False
+    try:
+        info = api.call("conversations.info", channel=cid).get("channel") or {}
+    except Exception as e:  # noqa: BLE001
+        return f"Slack didn't say what it is ({type(e).__name__})", refused_for_good(e)
+    if not info.get("is_mpim"):
+        return "not a group DM any more", True
+    verdict, why = routing.Gate(agent, api, c["team"], c["bot_user"], gates, {}).group_gate(cid)
+    if verdict == "ok":
+        return None, False
+    return f"its people aren't all admitted now ({why})", verdict == "drop"
+
+
+def place_bot(cfg, agent, place, secrets=None):
+    """(kind, ident, credentials, None) for a Slack place and an agent with a bot, or (…, refusal): what `send` and
+    `describe` both check first. A refusal is {reason, permanent}: permanent unless the secret is only not allowed yet."""
     kind, _, ident = place.partition(":")
     if kind not in ("dm", "group") or not ident.isalnum():
-        return {"ok": False, "reason": f"not a Slack place: {place[:80]}"}
-    if agent not in cfg["bots"]:
-        return {"ok": False, "reason": f"no Slack bot for {agent}"}
-    return {"ok": True, "guest": False, "peer": False, "venue": ident, "readers": [], "notes": []}
+        return kind, ident, None, {"reason": f"not a Slack place: {place[:80]}", "permanent": True}
+    name = cfg["bots"].get(agent)
+    if not name:
+        return kind, ident, None, {"reason": f"no Slack bot for {agent}", "permanent": True}
+    try:
+        return kind, ident, credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name), None
+    except common.SecretRefused as e:
+        return kind, ident, None, {"reason": f"{agent}'s bot: {e}", "permanent": False}
 
 
 def react(api, place, msg_id, add):
