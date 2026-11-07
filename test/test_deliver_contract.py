@@ -274,6 +274,7 @@ class LoomSource(unittest.TestCase):
         loader.exec_module(cli)
         self.assertIn("const NOTE = /" + cli.NOTE.pattern + "/;", self.src(LOOM_BOX_SRC, "src/policy.mjs"))
 
+    @unittest.skipUnless(LOOM_BOX_SRC, "LOOM_BOX_SRC (a loom-box checkout) unset")
     def test_the_runtimes_two_rules(self):
         self.assertIn("export const AGENT_NAME = /" + common.AGENT.pattern + "/;",
                       self.src(LOOM_BOX_SRC, "src/state.mjs"))

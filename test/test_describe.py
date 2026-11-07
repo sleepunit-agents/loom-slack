@@ -3,8 +3,8 @@ slugs; the runtime takes their tiers, restrictions and cards from its own gates)
 to its own brief files, the old bridge's ext `dm_extra` (a tier-2 person's project and field scopes) and its group
 briefs (the lowest tier present governs; the owner present). It fails closed: anyone the gates don't admit at tier 2
 and up, or the gates or Slack not answering, is no body."""
-import copy
 import contextlib
+import copy
 import io
 import json
 import shutil
@@ -21,7 +21,7 @@ ROOM = copy.deepcopy(GATES)
 ROOM["people"].update({
     "lee": {"name": "Lee", "tier": 2, "slack": {"T1": ["U7"]}, "projects": ["pond", "Bad Name!"],
             "field": {"pond": ["et-livonia", "boyle"], "toad": []}},
-    "ash": {"name": "Ash", "tier": 2, "slack": {"T1": ["U8"]}},
+    "ash": {"name": "Zed Ash", "tier": 2, "slack": {"T1": ["U8"]}},       # name order isn't slug order
     "max": {"name": "Max", "tier": 3, "slack": {"T1": ["U10"]}},
     "far": {"name": "Far", "tier": 2, "slack": {"T2": ["U11"]}},         # another workspace's id: not this bot's
     "gus": {"name": "Gus", "tier": 2, "slack": {"T1": ["U6"]}},          # a Slack guest account (users.info)
@@ -52,6 +52,11 @@ class Describe(unittest.TestCase):
                              "notes": ["field-pond", "project-pond"]})
         self.assertEqual([m for m, _ in self.api.calls], ["users.info"], "Slack's own check of the person, as routing's")
 
+    def test_a_single_project_written_as_a_string_is_one_project(self):
+        g = copy.deepcopy(ROOM)
+        g["people"]["ash"]["projects"] = "pond"
+        self.assertEqual(self.describe("dm:U8", gates=g)["notes"], ["project-pond"])
+
     def test_the_owner_and_an_unscoped_colleague_get_no_notes(self):
         self.assertEqual(self.describe("dm:U1")["notes"], [], "tier 3 has no scope notes, whatever its gates say")
         self.assertEqual(self.describe("dm:U8")["notes"], [])
@@ -66,7 +71,7 @@ class Describe(unittest.TestCase):
     def test_a_group_dm_names_everyone_in_it_and_the_lowest_tier_governs(self):
         d = self.describe("group:G1")
         self.assertEqual(d, {"ok": True, "guest": False, "peer": False, "venue": "G1", "readers": [],
-                             "members": ["ash", "lee"], "notes": ["group-tier-2"]},
+                             "members": ["lee", "ash"], "notes": ["group-tier-2"]},
                          "the whole answer; members sorted by name, not the bot; no scope notes in a group")
         d = self.describe("group:G2")
         self.assertEqual(d["members"], ["lee", "robin"])
@@ -87,7 +92,7 @@ class Describe(unittest.TestCase):
         self.assertEqual(self.describe("group:G9")["members"], ["lee", "robin"])
         self.assertNotIn("conversations.members", [m for m, _ in self.api.calls], "the fresh cache answers who's in it")
         common.save_json(self.dir / "state.json", {"cache": {"kit": {"members": {"G1": {"at": 0, "uids": ["B0", "U7", "U1"]}}}}})
-        self.assertEqual(self.describe("group:G1")["members"], ["ash", "lee"], "stale: Slack is asked")
+        self.assertEqual(self.describe("group:G1")["members"], ["lee", "ash"], "stale: Slack is asked")
         self.assertIn("conversations.members", [m for m, _ in self.api.calls])
 
     def test_a_dm_or_group_whose_person_the_runtime_couldnt_name_or_slack_wont_say_is_no_body(self):

@@ -282,10 +282,12 @@ def describe(cfg, agent, place, secrets=None, api_for=None):
         slug, rec = hit
         notes = []
         if rec["tier"] == 2:
-            notes += [f"project-{p}" for p in rec.get("projects") or [] if isinstance(p, str)]
+            projects = rec.get("projects")
+            projects = [projects] if isinstance(projects, str) else projects if isinstance(projects, list) else []
+            notes += [f"project-{p}" for p in projects if isinstance(p, str)]
             field = rec.get("field") if isinstance(rec.get("field"), dict) else {}
             notes += [f"field-{p}" for p, sites in field.items() if isinstance(p, str) and sites]
-        return {**base, "members": [slug], "notes": sorted({n for n in notes if NOTE.match(n)})}
+        return {**base, "members": [slug], "notes": sorted({n for n in notes if NOTE.fullmatch(n)})}
     verdict, why = gate.group_gate(ident)
     if verdict != "ok":
         return {"ok": False, "reason": f"{place}: {why}"}
@@ -297,7 +299,7 @@ def describe(cfg, agent, place, secrets=None, api_for=None):
     if lowest == 2 and any(rec["tier"] == 3 for _, rec in members):
         notes.append("group-owner-present")
     return {**base, "members": [slug for slug, _ in sorted(members, key=lambda m: str(m[1].get("name") or m[0]))],
-            "notes": sorted(n for n in notes if NOTE.match(n))}
+            "notes": sorted({n for n in notes if NOTE.fullmatch(n)})}
 
 
 def place_bot(cfg, agent, place, secrets=None):

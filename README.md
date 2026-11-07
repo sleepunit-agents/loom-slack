@@ -29,7 +29,7 @@ bot's agent's (bridges.md, rule 1). Who may reach the agent (`lib/loomslack/rout
 
 ```json
 {"id": "<agent>:<conversation>:<ts>", "agent": "kit", "venue": "slack", "place": "dm:<user id>" | "group:<conversation id>",
- "label": "DM with Robin" | "group DM with Robin, Sam", "from": {"kind": "person", "slug": "robin"} | {"kind": "unknown"},
+ "label": "DM with Robin" | "group DM with Robin, Sam[ and 2 more]", "from": {"kind": "person", "slug": "robin"} | {"kind": "unknown"},
  "kind": "message", "at": "<the message's time>", "text": "<its text, mentions as @name (the bot's own as @<agent>), links as text, &lt; &gt; &amp; as characters, file names>"}
 ```
 
