@@ -99,7 +99,8 @@ the piece's own settings apply.
 ## App credentials
 
 `SLACK_BOTS` names, for each agent, the secret holding its app's env file: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`
-(live), `SLACK_TEAM_ID`, `SLACK_BOT_USER_ID`. The secrets piece decides: only when `loom secrets may <agent> <name>`
+(live), `SLACK_TEAM_ID`, `SLACK_BOT_USER_ID` (the bot's *user* id, `U…`, as `auth.test` answers `user_id`; not its `B…` bot id:
+with that, its own posts aren't told apart and its mention reads `@someone`). The secrets piece decides: only when `loom secrets may <agent> <name>`
 answers `allowed` does this piece read it (host-side, `get --reveal`). The values stay in the process.
 
 ## Settings

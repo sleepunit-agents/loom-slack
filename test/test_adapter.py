@@ -302,6 +302,11 @@ class Intake(unittest.TestCase):
                                                channel="D1", channel_type="im")}))
         sock.tick()
         self.assertEqual(took[0]["text"], "@kit is 3 < 4 && 5 > 2? &lt;b&gt;")
+        # Escapes are decoded after mentions: a person's literal "<@U1>" (Slack sends &lt;@U1&gt;) stays words, never
+        # a mention of Robin, nor of the bot.
+        sock.events.put(("kit", {"event": dict(ev(T0 + 2, "U1", "type &lt;@U1&gt; or &lt;@UK1T&gt;"), channel="D1", channel_type="im")}))
+        sock.tick()
+        self.assertEqual(took[1]["text"], "type <@U1> or <@UK1T>")
 
     def test_a_frame_is_acked_and_queued_until_it_stops_accepting(self):
         router = adapter.Router(self.dir, common.ShadowLog(self.dir, "slack"), sink=lambda a, b: True)

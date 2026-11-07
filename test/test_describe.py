@@ -28,6 +28,8 @@ ROOM["people"].update({
 })
 # "Bad Name!" isn't a note name the runtime takes (policy.mjs NOTE): it's left out, not passed on.
 ROOM["people"]["robin"]["projects"] = ["pond"]          # tier 3: scopes are for tier 2 only
+ROOM["people"]["robin"]["field"] = {"pond": ["boyle"]}
+ROOM["people"]["kitbot"] = {"name": "Aaa Kit", "tier": 1, "slack": {"T1": ["B0"]}}   # the bot's own id, in the gates by mistake
 
 
 class Describe(unittest.TestCase):
