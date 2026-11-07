@@ -262,6 +262,19 @@ class Intake(unittest.TestCase):
                           ("group:G1", {"kind": "person", "slug": "robin"}, "group DM with Robin, Sam"),
                           ("dm:U2", {"kind": "person", "slug": "sam"}, "DM with Sam")])
 
+    def test_a_long_group_label_names_whom_it_can_and_counts_the_rest(self):
+        from loomslack import routing
+        names = ["Alexandra Whitfield", "Bartholomew Ng", "Christopher Ruiz", "Dominique Park", "Evangeline Moss",
+                 "Fitzgerald Kahananui", "Gwendolyn Ortiz"]
+        label = routing.label_of(True, None, names)
+        self.assertLessEqual(len(label), common.MAX_LABEL)
+        self.assertTrue(label.startswith("group DM with Alexandra Whitfield, Bartholomew Ng"), label)
+        self.assertRegex(label, r" and \d more$")
+        shown = label[len("group DM with "):label.rindex(" and ")].split(", ")
+        self.assertTrue(all(n in names for n in shown), "never a name cut short")
+        self.assertEqual(len(shown) + int(label.rsplit(" ", 2)[-2]), len(names))
+        self.assertEqual(routing.label_of(True, None, ["Robin", "Sam"]), "group DM with Robin, Sam")
+
     def test_live_text_reads_as_the_old_bridges_did(self):
         """Slack's escapes as the characters, and the agent's own bot's mention as @<agent>."""
         took = []

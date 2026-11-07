@@ -5,19 +5,13 @@ import contextlib
 import io
 import json
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from loomvenue import common
-from test.fixtures import GATES, FakeSlack
+from test.fixtures import GATES, FakeSlack, gates_argv
 from test.test_send import ENV, FakeSecrets, cli
-
-
-def gates_argv(gates):
-    """SLACK_GATES_COMMAND for a test: an argv that prints {"doc": gates}."""
-    return json.dumps([sys.executable, "-c", f"import json; print(json.dumps({{'doc': {gates!r}}}))"])
 
 
 class Presence(unittest.TestCase):

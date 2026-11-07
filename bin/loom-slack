@@ -8,7 +8,8 @@
                                            shadow: refused only because this adapter is in shadow). A place
                                            dm:<user id> opens that person's DM: one agent's message to a person
         … --describe                       the place's rules, for a body's start: {ok, guest: false, peer: false,
-                                           venue, readers: [], notes: []} (Slack routes only tier 2 and up)
+                                           venue, readers: [], members, notes} (Slack routes only tier 2 and up;
+                                           members: who's in it, by slug; notes: scope and group-tier names)
         … --status working|done [--message ID]...   a body at work there (the runtime's word): live, the run loop
                                            puts 👀 on the message it took, off once it answers; {ok, stop?}
     loom-slack compare --start T --adapter GLOB --bridge GLOB [--hours 24] [--json] [--check-gone]
@@ -24,6 +25,7 @@ routed message goes to loom's `deliver`, and `send` posts.
 """
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -39,6 +41,7 @@ from loomslack import adapter, routing  # noqa: E402
 PIECE = "slack"
 VENUE = "slack"
 MAX_POST = 3900
+NOTE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")     # a note name, as the runtime takes one (loom-box policy.mjs)
 ENV_KEYS = {"bot": "SLACK_BOT_TOKEN", "app": "SLACK_APP_TOKEN", "team": "SLACK_TEAM_ID", "bot_user": "SLACK_BOT_USER_ID"}
 
 
@@ -256,10 +259,7 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
     return answer({"ok": True, **({"id": f"{channel}:{first}"} if first else {})})
 
 
-NOTE = __import__("re").compile(r"^[A-Za-z0-9_.-]{1,64}$")
-
-
-def describe(cfg, agent, place, secrets=None, api_for=None, gates_doc=None):
+def describe(cfg, agent, place, secrets=None, api_for=None):
     """A Slack place's rules (the runtime's policy.mjs reads them before a body starts): never a guest venue (Slack
     routes only tier 2 and up), never a peer venue; who's in it (`members`, slugs: the runtime gives each one's tier,
     restriction and card from its own gates); and its `notes`, names the agent's policy maps to its own brief files
@@ -269,8 +269,10 @@ def describe(cfg, agent, place, secrets=None, api_for=None, gates_doc=None):
         `field` project with field sites (scopes are one person's: never a group's, and tier 3 needs none);
       - a group DM: `group-tier-<the lowest tier in it>`, and `group-owner-present` when that's 2 and a tier 3 is in.
 
-    Anyone in it the gates don't admit at tier 2 and up, or the gates or Slack not answering, is {ok: false}: no body
-    starts there, as no message of theirs would have been routed."""
+    Who's let in is the intake's own gate (routing.Gate: Slack's users.info check and the gates at tier 2 and up, the
+    group's members), with the intake's cached answers while they're fresh (it never writes them back). Anyone it
+    wouldn't route, Slack or the gates not answering, or a person whose gates slug the runtime couldn't name, is
+    {ok: false}: no body starts there."""
     kind, _, ident = place.partition(":")
     if kind not in ("dm", "group") or not ident.isalnum():
         return {"ok": False, "reason": f"not a Slack place: {place[:80]}"}
@@ -281,22 +283,16 @@ def describe(cfg, agent, place, secrets=None, api_for=None, gates_doc=None):
         c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
     except common.SecretRefused as e:
         return {"ok": False, "reason": f"{agent}'s bot: {e}"}
-    gates = (gates_doc or common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates")).doc()
+    gates = common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates").doc()
     if gates is None:
         return {"ok": False, "reason": f"{agent}'s gates can't be read"}
-    people = common.index(gates, "slack", c["team"], sections=("people",))
-
-    def person(uid):
-        hit = people.get(uid)
-        tier = hit[1].get("tier") if hit else None
-        if not hit or not isinstance(tier, int) or isinstance(tier, bool) or tier < 2 or not common.SLUG.match(hit[0]):
-            return None
-        return hit
+    cache = adapter.Router(cfg["data"], None).state["cache"].get(agent) or {}
+    gate = routing.Gate(agent, (api_for or routing.Slack)(c["bot"]), c["team"], c["bot_user"], gates, cache)
     base = {"ok": True, "guest": False, "peer": False, "venue": ident, "readers": []}
     if kind == "dm":
-        hit = person(ident)
-        if hit is None:
-            return {"ok": False, "reason": f"{place}: not someone {agent}'s gates admit on Slack (tier 2 and up)"}
+        verdict, hit = gate.person_gate(ident)
+        if verdict != "ok" or not common.SLUG.match(hit[0]) or not isinstance(hit[1].get("tier"), int):
+            return {"ok": False, "reason": f"{place}: not someone {agent} routes on Slack (tier 2 and up)"}
         slug, rec = hit
         notes = []
         if rec["tier"] == 2:
@@ -304,26 +300,16 @@ def describe(cfg, agent, place, secrets=None, api_for=None, gates_doc=None):
             field = rec.get("field") if isinstance(rec.get("field"), dict) else {}
             notes += [f"field-{p}" for p, sites in field.items() if isinstance(p, str) and sites]
         return {**base, "members": [slug], "notes": sorted({n for n in notes if NOTE.match(n)})}
-    data = common.load_json(Path(cfg["data"]) / "state.json", {}) or {}
-    hit = (((data.get("cache") or {}).get(agent) or {}).get("members") or {}).get(ident)
-    uids = hit.get("uids") if isinstance(hit, dict) and time.time() - float(hit.get("at") or 0) < routing.GROUP_MEMBERS_TTL_S else None
-    if uids is None:
-        try:
-            uids = (api_for or routing.Slack)(c["bot"]).call("conversations.members", channel=ident).get("members") or []
-        except Exception as e:  # noqa: BLE001 - the runtime gets a reason, never a trace
-            return {"ok": False, "reason": f"{place}: Slack didn't say who is in it ({type(e).__name__})"}
-    members = []
-    for uid in uids:
-        if uid == c["bot_user"]:
-            continue
-        hit = person(uid)
-        if hit is None:
-            return {"ok": False, "reason": f"{place}: someone in it isn't admitted on Slack (tier 2 and up)"}
-        members.append(hit)
-    if len(members) < 2:
-        return {"ok": False, "reason": f"{place}: not a group (fewer than two people in it)"}
+    verdict, why = gate.group_gate(ident)
+    if verdict != "ok":
+        return {"ok": False, "reason": f"{place}: {why}"}
+    members = [gate.people[uid] for uid in gate.members(ident) or [] if uid != c["bot_user"]]
+    if not all(common.SLUG.match(slug) for slug, _ in members):
+        return {"ok": False, "reason": f"{place}: someone in it has a gates slug the runtime can't name"}
     lowest = min(rec["tier"] for _, rec in members)
-    notes = [f"group-tier-{lowest}"] + (["group-owner-present"] if lowest == 2 and any(rec["tier"] == 3 for _, rec in members) else [])
+    notes = [f"group-tier-{lowest}"]
+    if lowest == 2 and any(rec["tier"] == 3 for _, rec in members):
+        notes.append("group-owner-present")
     return {**base, "members": [slug for slug, _ in sorted(members, key=lambda m: str(m[1].get("name") or m[0]))],
             "notes": notes}
 

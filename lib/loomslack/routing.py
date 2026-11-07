@@ -177,12 +177,26 @@ def label_of(group, hit, names=None):
     """The conversation's label: a DM by its person's name; a group DM by its members' names (the old bridge's), when
     the gate has them."""
     if group:
-        return f"group DM with {', '.join(names)}" if names else "group DM"
+        if not names:
+            return "group DM"
+        shown = list(names)
+        while len(shown) > 1 and len(group_label(shown, len(names)).encode("utf-16-le")) // 2 > LABEL_MAX:
+            shown.pop()
+        return group_label(shown, len(names))
     return f"DM with {hit[1].get('name')}" if hit and hit[1].get("name") else "DM"
 
 
+LABEL_MAX = common.MAX_LABEL     # loom's cap, in UTF-16 units: a long roster says how many more, never a cut name
+
+
+def group_label(shown, total):
+    more = total - len(shown)
+    return f"group DM with {', '.join(shown)}" + (f" and {more} more" if more else "")
+
+
 def member_names(gate, cid):
-    """The names of a group DM's people (not the bot), sorted, from the members the gate already read; [] if unknown."""
+    """The names of a group DM's people (not the bot), sorted, from the members the gate already read; [] if unknown.
+    Only after `admit` let the message through, which read (or refreshed) those members just now."""
     hit = gate.cache["members"].get(cid)
     out = []
     for uid in (hit or {}).get("uids") or []:

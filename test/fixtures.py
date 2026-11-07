@@ -79,3 +79,10 @@ class FakeSlack:
 
 def ev(ts, user, text="", **kw):
     return dict({"type": "message", "user": user, "ts": f"{ts:.6f}", "text": text}, **kw)
+
+
+def gates_argv(gates):
+    """SLACK_GATES_COMMAND for a test: an argv that prints {"doc": gates}."""
+    import json
+    import sys
+    return json.dumps([sys.executable, "-c", f"import json; print(json.dumps({{'doc': {gates!r}}}))"])
