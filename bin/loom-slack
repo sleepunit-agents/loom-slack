@@ -4,7 +4,8 @@
     loom-slack run                         the intake (the piece's service): shadow or live, by SLACK_MODE
     loom-slack send --place P --agent A    the venue's `send` (the runtime runs it): the text on stdin, posted as
                                            that agent's own bot; answers {ok, id?} or {ok: false, reason,
-                                           permanent?} (permanent: no retry will ever post it). A place
+                                           permanent?, shadow?} (permanent: no retry will ever post it;
+                                           shadow: refused only because this adapter is in shadow). A place
                                            dm:<user id> opens that person's DM: one agent's message to a person
         … --describe                       the place's rules, for a body's start: {ok, guest: false, peer: false,
                                            venue, readers: [], notes: []} (Slack routes only tier 2 and up)
@@ -225,7 +226,9 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
         msgs = [argv[j + 1] for j, x in enumerate(argv) if x == "--message" and j + 1 < len(argv)]
         return answer(common.Presence(cfg["data"]).status(agent, place, state, msgs))
     if cfg["mode"] != "live":
-        return never("loom-slack is in shadow mode: it posts nothing")
+        # `shadow: true`: the runtime hands a DM it refused this way to the old bridge, which posts there until this
+        # adapter is live (loom-box delivery.mjs LEGACY_SEND, t-1920); any other refusal for good stays refused.
+        return answer({"ok": False, "reason": "loom-slack is in shadow mode: it posts nothing", "permanent": True, "shadow": True})
     kind, _, ident = place.partition(":")
     if kind not in ("dm", "group") or not ident.isalnum():
         return never(f"not a Slack place: {place[:80]}")
