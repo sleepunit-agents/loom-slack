@@ -120,6 +120,13 @@ class Gate:
         self.cache["members"][cid] = {"at": self.now(), "uids": uids}
         return uids
 
+    def member_names(self, cid):
+        """(names, total): a group DM's people but the bot, as the members this gate last read (`admit` reads or
+        refreshes them just before), their gates names sorted, and how many there are, named or not."""
+        uids = [u for u in ((self.cache["members"].get(cid) or {}).get("uids") or []) if u != self.bot_user]
+        names = sorted(str(p[1]["name"]) for p in (self.people.get(u) for u in uids) if p and p[1].get("name"))
+        return names, len(uids)
+
     def group_gate(self, cid):
         uids = self.members(cid)
         if uids is None:
@@ -140,7 +147,7 @@ class Gate:
 
     def admit(self, cid, group, uid):
         """("ok", from) | ("wait", why) | ("drop", why) for a message in conversation `cid` from `uid`."""
-        if group or not str(cid).startswith("D"):
+        if is_group(cid, group):
             verdict, why = self.group_gate(cid)
             if verdict != "ok":
                 return verdict, why
@@ -165,7 +172,7 @@ def routable(ev, bot_user):
 
 def place_of(cid, uid, group):
     """conversations.md's place: a 1:1 DM by the person's user id, a group DM by its own id."""
-    return f"group:{cid}" if group or not str(cid).startswith("D") else f"dm:{uid}"
+    return f"group:{cid}" if is_group(cid, group) else f"dm:{uid}"
 
 
 def msg_id(cid, ts):
@@ -173,37 +180,28 @@ def msg_id(cid, ts):
     return f"{cid}:{ts}"
 
 
-def label_of(group, hit, names=None):
-    """The conversation's label: a DM by its person's name; a group DM by its members' names (the old bridge's), when
-    the gate has them."""
-    if group:
-        if not names:
-            return "group DM"
-        shown = list(names)
-        while len(shown) > 1 and len(group_label(shown, len(names)).encode("utf-16-le")) // 2 > LABEL_MAX:
-            shown.pop()
-        return group_label(shown, len(names))
-    return f"DM with {hit[1].get('name')}" if hit and hit[1].get("name") else "DM"
+def is_group(cid, group):
+    """A group DM, or anything that isn't a 1:1 DM (its id starts with D), even if the flag were lost: gated as a room."""
+    return bool(group) or not str(cid).startswith("D")
 
 
-LABEL_MAX = common.MAX_LABEL     # loom's cap, in UTF-16 units: a long roster says how many more, never a cut name
+def label_of(group, hit, names=None, total=None):
+    """The conversation's label: a DM by its person's name; a group DM by its people's names (the old bridge's), as
+    many as fit in loom's label, and how many more (`total` counts everyone in it but the bot, named or not)."""
+    if not group:
+        return f"DM with {hit[1].get('name')}" if hit and hit[1].get("name") else "DM"
+    names = list(names or [])
+    total = max(total or 0, len(names))
+    for n in range(len(names), 0, -1):
+        label = group_label(names[:n], total)
+        if common.len16(label) <= common.MAX_LABEL:
+            return label
+    return f"group DM with {total} people" if total else "group DM"
 
 
 def group_label(shown, total):
     more = total - len(shown)
     return f"group DM with {', '.join(shown)}" + (f" and {more} more" if more else "")
-
-
-def member_names(gate, cid):
-    """The names of a group DM's people (not the bot), sorted, from the members the gate already read; [] if unknown.
-    Only after `admit` let the message through, which read (or refreshed) those members just now."""
-    hit = gate.cache["members"].get(cid)
-    out = []
-    for uid in (hit or {}).get("uids") or []:
-        p = gate.people.get(uid)
-        if uid != gate.bot_user and p and p[1].get("name"):
-            out.append(str(p[1]["name"]))
-    return sorted(out)
 
 
 def clean_text(text, people, bot_user=None, agent=None):

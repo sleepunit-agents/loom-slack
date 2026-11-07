@@ -232,16 +232,9 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
         # `shadow: true`: the runtime hands a DM it refused this way to the old bridge, which posts there until this
         # adapter is live (loom-box delivery.mjs LEGACY_SEND, t-1920); any other refusal for good stays refused.
         return answer({"ok": False, "reason": "loom-slack is in shadow mode: it posts nothing", "permanent": True, "shadow": True})
-    kind, _, ident = place.partition(":")
-    if kind not in ("dm", "group") or not ident.isalnum():
-        return never(f"not a Slack place: {place[:80]}")
-    name = cfg["bots"].get(agent)
-    if not name:
-        return never(f"no Slack bot for {agent}")
-    try:
-        c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
-    except common.SecretRefused as e:
-        return answer({"ok": False, "reason": f"{agent}'s bot: {e}"})
+    kind, ident, c, refused = place_bot(cfg, agent, place, secrets)
+    if refused:
+        return never(refused["reason"]) if refused["permanent"] else answer({"ok": False, "reason": refused["reason"]})
     text = (stdin if stdin is not None else sys.stdin).read()
     if not text.strip():
         return never("nothing to send")
@@ -273,21 +266,14 @@ def describe(cfg, agent, place, secrets=None, api_for=None):
     group's members), with the intake's cached answers while they're fresh (it never writes them back). Anyone it
     wouldn't route, Slack or the gates not answering, or a person whose gates slug the runtime couldn't name, is
     {ok: false}: no body starts there."""
-    kind, _, ident = place.partition(":")
-    if kind not in ("dm", "group") or not ident.isalnum():
-        return {"ok": False, "reason": f"not a Slack place: {place[:80]}"}
-    name = cfg["bots"].get(agent)
-    if not name:
-        return {"ok": False, "reason": f"no Slack bot for {agent}"}
-    try:
-        c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
-    except common.SecretRefused as e:
-        return {"ok": False, "reason": f"{agent}'s bot: {e}"}
+    kind, ident, c, refused = place_bot(cfg, agent, place, secrets)
+    if refused:
+        return {"ok": False, "reason": refused["reason"]}
     gates = common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates").doc()
     if gates is None:
         return {"ok": False, "reason": f"{agent}'s gates can't be read"}
-    cache = adapter.Router(cfg["data"], None).state["cache"].get(agent) or {}
-    gate = routing.Gate(agent, (api_for or routing.Slack)(c["bot"]), c["team"], c["bot_user"], gates, cache)
+    gate = routing.Gate(agent, (api_for or routing.Slack)(c["bot"]), c["team"], c["bot_user"], gates,
+                        adapter.cached(cfg["data"], agent))
     base = {"ok": True, "guest": False, "peer": False, "venue": ident, "readers": []}
     if kind == "dm":
         verdict, hit = gate.person_gate(ident)
@@ -311,7 +297,22 @@ def describe(cfg, agent, place, secrets=None, api_for=None):
     if lowest == 2 and any(rec["tier"] == 3 for _, rec in members):
         notes.append("group-owner-present")
     return {**base, "members": [slug for slug, _ in sorted(members, key=lambda m: str(m[1].get("name") or m[0]))],
-            "notes": notes}
+            "notes": sorted(n for n in notes if NOTE.match(n))}
+
+
+def place_bot(cfg, agent, place, secrets=None):
+    """(kind, ident, credentials, None) for a Slack place and an agent with a bot, or (…, refusal): what `send` and
+    `describe` both check first. A refusal is {reason, permanent}: permanent unless the secret is only not allowed yet."""
+    kind, _, ident = place.partition(":")
+    if kind not in ("dm", "group") or not ident.isalnum():
+        return kind, ident, None, {"reason": f"not a Slack place: {place[:80]}", "permanent": True}
+    name = cfg["bots"].get(agent)
+    if not name:
+        return kind, ident, None, {"reason": f"no Slack bot for {agent}", "permanent": True}
+    try:
+        return kind, ident, credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name), None
+    except common.SecretRefused as e:
+        return kind, ident, None, {"reason": f"{agent}'s bot: {e}", "permanent": False}
 
 
 def react(api, place, msg_id, add):

@@ -248,7 +248,7 @@ class Intake(unittest.TestCase):
         self.assertEqual(self.log(), [], "live writes no shadow log")
 
     def test_live_names_who_wrote_in_every_message_never_the_owner_for_someone_else(self):
-        """t-1745 (Jonathan's ruling, t-1943): the runtime and the body hear who asked. Each message's `from` is its own
+        """t-1745 (the owner's ruling, t-1943): the runtime and the body hear who asked. Each message's `from` is its own
         sender's card, in a DM and in a group DM, whoever else is in the room; a group DM's label names its people."""
         took = []
         router = adapter.Router(self.dir, common.ShadowLog(self.dir, "slack"),
@@ -266,14 +266,30 @@ class Intake(unittest.TestCase):
         from loomslack import routing
         names = ["Alexandra Whitfield", "Bartholomew Ng", "Christopher Ruiz", "Dominique Park", "Evangeline Moss",
                  "Fitzgerald Kahananui", "Gwendolyn Ortiz"]
-        label = routing.label_of(True, None, names)
-        self.assertLessEqual(len(label), common.MAX_LABEL)
+        label = routing.label_of(True, None, names, len(names))
+        self.assertLessEqual(common.len16(label), common.MAX_LABEL)
         self.assertTrue(label.startswith("group DM with Alexandra Whitfield, Bartholomew Ng"), label)
-        self.assertRegex(label, r" and \d more$")
         shown = label[len("group DM with "):label.rindex(" and ")].split(", ")
         self.assertTrue(all(n in names for n in shown), "never a name cut short")
-        self.assertEqual(len(shown) + int(label.rsplit(" ", 2)[-2]), len(names))
-        self.assertEqual(routing.label_of(True, None, ["Robin", "Sam"]), "group DM with Robin, Sam")
+        self.assertTrue(label.endswith(f" and {len(names) - len(shown)} more"), label)
+        self.assertEqual(routing.label_of(True, None, ["Robin", "Sam"], 2), "group DM with Robin, Sam")
+        self.assertEqual(routing.label_of(True, None, ["Robin", "Sam"], 3), "group DM with Robin, Sam and 1 more",
+                         "someone the gates have no name for is counted")
+        self.assertEqual(routing.label_of(True, None, ["X" * 90, "Sam"], 2), "group DM with 2 people", "no name fits")
+        self.assertEqual(routing.label_of(True, None, ["\ud800bad", "Sam"], 2), "group DM with \ud800bad, Sam",
+                         "a lone surrogate is counted, not raised")
+
+    def test_a_group_label_never_names_the_bot(self):
+        """The bot's own id in the gates (an agent listed as a person by mistake) is not one of the group's people."""
+        took = []
+        gates = {"people": dict(GATES["people"], bot={"name": "Kit Bot", "tier": 2, "slack": {"T1": ["B0"]}})}
+        self.agents["kit"].gates_doc = StaticDoc(gates)
+        router = adapter.Router(self.dir, common.ShadowLog(self.dir, "slack"),
+                                sink=lambda a, b: took.append(b) or True, now=self.now)
+        sock = adapter.Socket(router, self.agents, {"kit": "app"})
+        sock.events.put(("kit", {"event": dict(ev(T0 + 1, "U1", "hi"), channel="G1", channel_type="mpim")}))
+        sock.tick()
+        self.assertEqual(took[0]["label"], "group DM with Robin, Sam")
 
     def test_live_text_reads_as_the_old_bridges_did(self):
         """Slack's escapes as the characters, and the agent's own bot's mention as @<agent>."""

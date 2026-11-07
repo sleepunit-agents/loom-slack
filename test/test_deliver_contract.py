@@ -264,6 +264,16 @@ class LoomSource(unittest.TestCase):
                 self.assertTrue(any(_re.fullmatch(pat, p) for p in ours), f"no rule here gives loom's: {lit}")
 
     @unittest.skipUnless(LOOM_BOX_SRC, "LOOM_BOX_SRC (a loom-box checkout) unset")
+    def test_a_note_name_is_the_runtimes(self):
+        """describe's notes are names the runtime takes (loom-box policy.mjs NOTE); one it wouldn't is left out here."""
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("loom_slack_bin_c", str(Path(__file__).resolve().parent.parent / "bin" / "loom-slack"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cli)
+        self.assertIn("const NOTE = /" + cli.NOTE.pattern + "/;", self.src(LOOM_BOX_SRC, "src/policy.mjs"))
+
     def test_the_runtimes_two_rules(self):
         self.assertIn("export const AGENT_NAME = /" + common.AGENT.pattern + "/;",
                       self.src(LOOM_BOX_SRC, "src/state.mjs"))

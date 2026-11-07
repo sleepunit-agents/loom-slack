@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from loomvenue import common
-from test.fixtures import GATES, USERS, FakeSlack, gates_argv
+from test.fixtures import GATES, FakeSlack, gates_argv
 from test.test_send import ENV, FakeSecrets, cli
 
 ROOM = copy.deepcopy(GATES)
@@ -58,8 +58,6 @@ class Describe(unittest.TestCase):
         self.assertEqual(self.describe("dm:U8")["members"], ["ash"])
 
     def test_a_dm_with_anyone_the_gates_dont_admit_is_no_body(self):
-        USERS.setdefault("U10", {"team_id": "T1"})
-        USERS.setdefault("U11", {"team_id": "T1"})
         # a guest (tier 1), a stranger, an agent's bot, a person under another workspace's id, a Slack guest account
         for uid in ("U3", "U4", "U9", "U11", "U6"):
             with self.subTest(uid=uid):
@@ -67,12 +65,12 @@ class Describe(unittest.TestCase):
 
     def test_a_group_dm_names_everyone_in_it_and_the_lowest_tier_governs(self):
         d = self.describe("group:G1")
-        self.assertEqual(d["members"], ["ash", "lee"], "sorted by name; not the bot")
-        self.assertEqual(d["notes"], ["group-tier-2"], "no scope notes in a group")
+        self.assertEqual(d, {"ok": True, "guest": False, "peer": False, "venue": "G1", "readers": [],
+                             "members": ["ash", "lee"], "notes": ["group-tier-2"]},
+                         "the whole answer; members sorted by name, not the bot; no scope notes in a group")
         d = self.describe("group:G2")
         self.assertEqual(d["members"], ["lee", "robin"])
-        self.assertEqual(d["notes"], ["group-tier-2", "group-owner-present"])
-        USERS.setdefault("U10", {"team_id": "T1"})
+        self.assertEqual(d["notes"], ["group-owner-present", "group-tier-2"])
         d = self.describe("group:G5")
         self.assertEqual(d["members"], ["max", "robin"])
         self.assertEqual(d["notes"], ["group-tier-3"], "all at the owner's tier: no owner-present note")
@@ -91,6 +89,15 @@ class Describe(unittest.TestCase):
         common.save_json(self.dir / "state.json", {"cache": {"kit": {"members": {"G1": {"at": 0, "uids": ["B0", "U7", "U1"]}}}}})
         self.assertEqual(self.describe("group:G1")["members"], ["ash", "lee"], "stale: Slack is asked")
         self.assertIn("conversations.members", [m for m, _ in self.api.calls])
+
+    def test_a_dm_or_group_whose_person_the_runtime_couldnt_name_or_slack_wont_say_is_no_body(self):
+        odd = copy.deepcopy(ROOM)
+        odd["people"]["Not_A_Slug"] = {"name": "Odd", "tier": 2, "slack": {"T1": ["U12"]}}
+        self.assertFalse(self.describe("dm:U12", gates=odd)["ok"], "a gates slug the runtime can't name")
+        self.api.members["G7"] = ["B0", "U7", "U12"]
+        self.assertFalse(self.describe("group:G7", gates=odd)["ok"])
+        self.api.fail.add("users.info")
+        self.assertFalse(self.describe("dm:U8")["ok"], "Slack not answering users.info")
 
     def test_fail_closed_without_the_gates_or_the_bot(self):
         self.assertEqual(self.describe("dm:U7", gates=None), {"ok": False, "reason": "kit's gates can't be read"})
