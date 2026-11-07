@@ -110,8 +110,10 @@ class Router:
         if verdict != "ok":
             return verdict
         place = routing.place_of(cid, ev.get("user"), group)
-        body = common.delivery(mid, a.agent, "slack", place, routing.label_of(group, gate.people.get(ev.get("user"))),
-                               frm, common.iso(ev["ts"]), routing.text_of(ev, gate.people))
+        grouped = group or not str(cid).startswith("D")
+        label = routing.label_of(grouped, gate.people.get(ev.get("user")), routing.member_names(gate, cid) if grouped else None)
+        body = common.delivery(mid, a.agent, "slack", place, label, frm, common.iso(ev["ts"]),
+                               routing.text_of(ev, gate.people, a.bot_user, a.agent))
         if self.sink is None:
             self.shadow.routed(mid, a.agent, place, contract=self.contract_check(a.agent, mid, body))
             self.note_handled(a.agent, mid)

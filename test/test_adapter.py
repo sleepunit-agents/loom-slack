@@ -247,6 +247,33 @@ class Intake(unittest.TestCase):
         self.assertEqual(len(took), 3)
         self.assertEqual(self.log(), [], "live writes no shadow log")
 
+    def test_live_names_who_wrote_in_every_message_never_the_owner_for_someone_else(self):
+        """t-1745 (Jonathan's ruling, t-1943): the runtime and the body hear who asked. Each message's `from` is its own
+        sender's card, in a DM and in a group DM, whoever else is in the room; a group DM's label names its people."""
+        took = []
+        router = adapter.Router(self.dir, common.ShadowLog(self.dir, "slack"),
+                                sink=lambda a, b: took.append(b) or True, now=self.now)
+        sock = adapter.Socket(router, self.agents, {"kit": "app"})
+        for i, (cid, kind, uid) in enumerate((("G1", "mpim", "U2"), ("G1", "mpim", "U1"), ("D2", "im", "U2"))):
+            sock.events.put(("kit", {"event": dict(ev(T0 + 1 + i, uid, f"m{i}"), channel=cid, channel_type=kind)}))
+        sock.tick()
+        self.assertEqual([(b["place"], b["from"], b["label"]) for b in took],
+                         [("group:G1", {"kind": "person", "slug": "sam"}, "group DM with Robin, Sam"),
+                          ("group:G1", {"kind": "person", "slug": "robin"}, "group DM with Robin, Sam"),
+                          ("dm:U2", {"kind": "person", "slug": "sam"}, "DM with Sam")])
+
+    def test_live_text_reads_as_the_old_bridges_did(self):
+        """Slack's escapes as the characters, and the agent's own bot's mention as @<agent>."""
+        took = []
+        router = adapter.Router(self.dir, common.ShadowLog(self.dir, "slack"),
+                                sink=lambda a, b: took.append(b) or True, now=self.now)
+        self.agents["kit"].bot_user = "UK1T"          # a bot's user id is a U… like anyone's
+        sock = adapter.Socket(router, self.agents, {"kit": "app"})
+        sock.events.put(("kit", {"event": dict(ev(T0 + 1, "U1", "<@UK1T> is 3 &lt; 4 &amp;&amp; 5 &gt; 2? &amp;lt;b&amp;gt;"),
+                                               channel="D1", channel_type="im")}))
+        sock.tick()
+        self.assertEqual(took[0]["text"], "@kit is 3 < 4 && 5 > 2? &lt;b&gt;")
+
     def test_a_frame_is_acked_and_queued_until_it_stops_accepting(self):
         router = adapter.Router(self.dir, common.ShadowLog(self.dir, "slack"), sink=lambda a, b: True)
         sock = adapter.Socket(router, self.agents, {"kit": "app"})

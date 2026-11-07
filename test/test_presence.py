@@ -5,20 +5,27 @@ import contextlib
 import io
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from loomvenue import common
-from test.fixtures import FakeSlack
+from test.fixtures import GATES, FakeSlack
 from test.test_send import ENV, FakeSecrets, cli
+
+
+def gates_argv(gates):
+    """SLACK_GATES_COMMAND for a test: an argv that prints {"doc": gates}."""
+    return json.dumps([sys.executable, "-c", f"import json; print(json.dumps({{'doc': {gates!r}}}))"])
 
 
 class Presence(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="loom-slack-p-"))
         self.addCleanup(shutil.rmtree, self.dir, True)
-        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}', "SLACK_DATA": str(self.dir)})
+        self.cfg = cli.config({"SLACK_MODE": "live", "SLACK_BOTS": '{"kit": "kit-slack.env"}', "SLACK_DATA": str(self.dir),
+                               "SLACK_GATES_COMMAND": gates_argv(GATES)})
         self.api = FakeSlack()
 
     def send(self, argv, text=""):
@@ -32,7 +39,8 @@ class Presence(unittest.TestCase):
 
     def test_a_slack_place_is_never_a_guest_or_peer_venue(self):
         self.assertEqual(self.send(["--place", "dm:U1", "--agent", "kit", "--describe"]),
-                         {"ok": True, "guest": False, "peer": False, "venue": "U1", "readers": [], "notes": []})
+                         {"ok": True, "guest": False, "peer": False, "venue": "U1", "readers": [], "members": ["robin"],
+                          "notes": []})
         self.assertFalse(self.send(["--place", "channel:1", "--agent", "kit", "--describe"])["ok"])
         self.assertFalse(self.send(["--place", "dm:U1", "--agent", "bolt", "--describe"])["ok"])
 

@@ -219,7 +219,7 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
     except (ValueError, IndexError):
         return never("usage: loom-slack send --place <place> --agent <agent>")
     if "--describe" in argv:
-        return answer(describe(cfg, agent, place))
+        return answer(describe(cfg, agent, place, secrets=secrets, api_for=api_for))
     if "--status" in argv:
         i = argv.index("--status")
         state = argv[i + 1] if i + 1 < len(argv) else ""
@@ -256,14 +256,76 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
     return answer({"ok": True, **({"id": f"{channel}:{first}"} if first else {})})
 
 
-def describe(cfg, agent, place):
-    """A Slack place's rules: never a guest venue (Slack routes only tier 2 and up), never a peer venue."""
+NOTE = __import__("re").compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def describe(cfg, agent, place, secrets=None, api_for=None, gates_doc=None):
+    """A Slack place's rules (the runtime's policy.mjs reads them before a body starts): never a guest venue (Slack
+    routes only tier 2 and up), never a peer venue; who's in it (`members`, slugs: the runtime gives each one's tier,
+    restriction and card from its own gates); and its `notes`, names the agent's policy maps to its own brief files
+    (t-1745, the old bridge's ext dm_extra and group briefs):
+
+      - a 1:1 DM with a tier-2 person: `project-<p>` for each of their gates' `projects`, `field-<p>` for each
+        `field` project with field sites (scopes are one person's: never a group's, and tier 3 needs none);
+      - a group DM: `group-tier-<the lowest tier in it>`, and `group-owner-present` when that's 2 and a tier 3 is in.
+
+    Anyone in it the gates don't admit at tier 2 and up, or the gates or Slack not answering, is {ok: false}: no body
+    starts there, as no message of theirs would have been routed."""
     kind, _, ident = place.partition(":")
     if kind not in ("dm", "group") or not ident.isalnum():
         return {"ok": False, "reason": f"not a Slack place: {place[:80]}"}
-    if agent not in cfg["bots"]:
+    name = cfg["bots"].get(agent)
+    if not name:
         return {"ok": False, "reason": f"no Slack bot for {agent}"}
-    return {"ok": True, "guest": False, "peer": False, "venue": ident, "readers": [], "notes": []}
+    try:
+        c = credentials(secrets or common.Secrets(cfg["may"], cfg["get"]), agent, name)
+    except common.SecretRefused as e:
+        return {"ok": False, "reason": f"{agent}'s bot: {e}"}
+    gates = (gates_doc or common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates")).doc()
+    if gates is None:
+        return {"ok": False, "reason": f"{agent}'s gates can't be read"}
+    people = common.index(gates, "slack", c["team"], sections=("people",))
+
+    def person(uid):
+        hit = people.get(uid)
+        tier = hit[1].get("tier") if hit else None
+        if not hit or not isinstance(tier, int) or isinstance(tier, bool) or tier < 2 or not common.SLUG.match(hit[0]):
+            return None
+        return hit
+    base = {"ok": True, "guest": False, "peer": False, "venue": ident, "readers": []}
+    if kind == "dm":
+        hit = person(ident)
+        if hit is None:
+            return {"ok": False, "reason": f"{place}: not someone {agent}'s gates admit on Slack (tier 2 and up)"}
+        slug, rec = hit
+        notes = []
+        if rec["tier"] == 2:
+            notes += [f"project-{p}" for p in rec.get("projects") or [] if isinstance(p, str)]
+            field = rec.get("field") if isinstance(rec.get("field"), dict) else {}
+            notes += [f"field-{p}" for p, sites in field.items() if isinstance(p, str) and sites]
+        return {**base, "members": [slug], "notes": sorted({n for n in notes if NOTE.match(n)})}
+    data = common.load_json(Path(cfg["data"]) / "state.json", {}) or {}
+    hit = (((data.get("cache") or {}).get(agent) or {}).get("members") or {}).get(ident)
+    uids = hit.get("uids") if isinstance(hit, dict) and time.time() - float(hit.get("at") or 0) < routing.GROUP_MEMBERS_TTL_S else None
+    if uids is None:
+        try:
+            uids = (api_for or routing.Slack)(c["bot"]).call("conversations.members", channel=ident).get("members") or []
+        except Exception as e:  # noqa: BLE001 - the runtime gets a reason, never a trace
+            return {"ok": False, "reason": f"{place}: Slack didn't say who is in it ({type(e).__name__})"}
+    members = []
+    for uid in uids:
+        if uid == c["bot_user"]:
+            continue
+        hit = person(uid)
+        if hit is None:
+            return {"ok": False, "reason": f"{place}: someone in it isn't admitted on Slack (tier 2 and up)"}
+        members.append(hit)
+    if len(members) < 2:
+        return {"ok": False, "reason": f"{place}: not a group (fewer than two people in it)"}
+    lowest = min(rec["tier"] for _, rec in members)
+    notes = [f"group-tier-{lowest}"] + (["group-owner-present"] if lowest == 2 and any(rec["tier"] == 3 for _, rec in members) else [])
+    return {**base, "members": [slug for slug, _ in sorted(members, key=lambda m: str(m[1].get("name") or m[0]))],
+            "notes": notes}
 
 
 def react(api, place, msg_id, add):

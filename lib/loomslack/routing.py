@@ -173,26 +173,43 @@ def msg_id(cid, ts):
     return f"{cid}:{ts}"
 
 
-def label_of(group, hit):
+def label_of(group, hit, names=None):
+    """The conversation's label: a DM by its person's name; a group DM by its members' names (the old bridge's), when
+    the gate has them."""
     if group:
-        return "group DM"
+        return f"group DM with {', '.join(names)}" if names else "group DM"
     return f"DM with {hit[1].get('name')}" if hit and hit[1].get("name") else "DM"
 
 
-def clean_text(text, people):
-    """Slack's markup made readable: a known person's mention as @name, any other as @someone, links as text."""
+def member_names(gate, cid):
+    """The names of a group DM's people (not the bot), sorted, from the members the gate already read; [] if unknown."""
+    hit = gate.cache["members"].get(cid)
+    out = []
+    for uid in (hit or {}).get("uids") or []:
+        p = gate.people.get(uid)
+        if uid != gate.bot_user and p and p[1].get("name"):
+            out.append(str(p[1]["name"]))
+    return sorted(out)
+
+
+def clean_text(text, people, bot_user=None, agent=None):
+    """Slack's markup made readable (the old bridge's clean_text): a known person's mention as @name, this bot's as
+    @<agent>, any other as @someone; links as text; and Slack's three escapes (&lt; &gt; &amp;) as the characters."""
     def mention(mo):
+        if bot_user and agent and mo.group(1) == bot_user:
+            return f"@{agent}"
         hit = people.get(mo.group(1))
         return f"@{hit[1].get('name')}" if hit and hit[1].get("name") else "@someone"
 
     def link(mo):
         return f"{mo.group(2)} ({mo.group(1)})" if mo.group(2) else mo.group(1)
     text = MENTION.sub(mention, text or "")
-    return LINK.sub(link, text)
+    text = LINK.sub(link, text)
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def text_of(ev, people):
-    text = clean_text(ev.get("text"), people)
+def text_of(ev, people, bot_user=None, agent=None):
+    text = clean_text(ev.get("text"), people, bot_user, agent)
     for f in ev.get("files", []) or []:
         text += f" [file: {f.get('name')}]"
     return text

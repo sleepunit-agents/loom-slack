@@ -29,9 +29,14 @@ bot's agent's (bridges.md, rule 1). Who may reach the agent (`lib/loomslack/rout
 
 ```json
 {"id": "<agent>:<conversation>:<ts>", "agent": "kit", "venue": "slack", "place": "dm:<user id>" | "group:<conversation id>",
- "label": "DM with Robin" | "group DM", "from": {"kind": "person", "slug": "robin"} | {"kind": "unknown"},
- "kind": "message", "at": "<the message's time>", "text": "<its text, mentions as @name, links as text, file names>"}
+ "label": "DM with Robin" | "group DM with Robin, Sam", "from": {"kind": "person", "slug": "robin"} | {"kind": "unknown"},
+ "kind": "message", "at": "<the message's time>", "text": "<its text, mentions as @name (the bot's own as @<agent>), links as text, &lt; &gt; &amp; as characters, file names>"}
 ```
+
+**`from`** is that one message's own sender, always: in a group DM too, whoever else is in it. The owner's card is
+`from` only on a message the owner's own Slack id sent; anyone the gates don't name is `{kind: unknown}`. The runtime
+fences each message under its sender and their tier, so a body hears who asked, and never takes a colleague's request
+for the owner's (t-1745, t-1943).
 
 The text goes only to `deliver`, which puts it in loom's audit log; the turn in loom is metadata only. This piece
 logs ids, counts and reasons, never text or a token. Files aren't fetched: a file's name is in the text.
@@ -112,8 +117,15 @@ answers `allowed` does this piece read it (host-side, `get --reveal`). The value
 
 ## What the runtime asks of a place, and a body at work
 
-- `send --describe` answers `{ok, guest: false, peer: false, venue, readers: [], notes: []}`, because Slack routes
-  only tier 2 and up. A tier's extra brief is the agent's policy's (`briefs.tiers`), in the runtime.
+- `send --describe` answers `{ok, guest: false, peer: false, venue, readers: [], members, notes}` (Slack routes only
+  tier 2 and up, so never a guest venue). `members` is who is in the place, by slug: a DM's one person, or everyone in
+  a group DM (not the bot); the runtime gives each one's tier, standing restriction (and in a DM, a tier-2 person's
+  standing authority) and person card from its own gates (loom-box `policy.mjs`). `notes` are names the agent's policy
+  maps to its own brief files (the old bridge's `dm_extra` and group briefs, t-1745): a DM with a tier-2 person has
+  `project-<p>` for each of their gates' `projects` and `field-<p>` for each `field` project with sites; a group DM has
+  `group-tier-<lowest tier in it>`, and `group-owner-present` when that's 2 and a tier 3 is in it. A person in it the
+  gates don't admit at tier 2 and up, or the gates or Slack (`conversations.members`, or the intake's fresh cache of
+  it) not answering, is `{ok: false}`: no body starts there.
 - `send --status working --message <delivery id>` (and `done`) is the runtime's word that a body is at work. Live,
   the intake puts 👀 (`eyes`) on the message the body took, and takes it off once the agent's `send` posts there or the
   body is done.
@@ -122,8 +134,8 @@ answers `allowed` does this piece read it (host-side, `get --reveal`). The value
 
 ## Not here (yet)
 
-The local transcript a body read as context, fetching files, and a group DM's roster and restricts. `render` isn't
-declared: loom's generic render shows these conversations.
+Fetching files (a file's name is in the text), and the local transcript a body read as context (a conversation's
+history is loom's: its digests). `render` isn't declared: loom's generic render shows these conversations.
 
 ## Tests
 
