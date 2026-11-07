@@ -239,6 +239,12 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
     if not text.strip():
         return never("nothing to send")
     api = (api_for or routing.Slack)(c["bot"])
+    if kind == "group":
+        # A group's people are asked again before every post, never from a cache: a reply goes only to a group DM
+        # whose people the gates still all admit (it could have become a channel, or gained someone).
+        why, permanent = group_still_admitted(cfg, agent, ident, c, api)
+        if why:
+            return never(f"{place}: {why}") if permanent else answer({"ok": False, "reason": f"{place}: {why}"})
     first = None
     try:
         channel = api.call("conversations.open", users=ident)["channel"]["id"] if kind == "dm" else ident
@@ -300,6 +306,24 @@ def describe(cfg, agent, place, secrets=None, api_for=None):
         notes.append("group-owner-present")
     return {**base, "members": [slug for slug, _ in sorted(members, key=lambda m: str(m[1].get("name") or m[0]))],
             "notes": sorted({n for n in notes if NOTE.fullmatch(n)})}
+
+
+def group_still_admitted(cfg, agent, cid, c, api):
+    """(None, _) when `cid` is still a group DM (conversations.info: is_mpim) whose every member the gates admit, asked
+    of Slack now (no cache); else (why, permanent): the gates or Slack not answering is for now, the rest for good."""
+    gates = common.Doc(common.fill(cfg["gates"], agent=agent), what=f"{agent}'s gates").doc()
+    if gates is None:
+        return "the gates can't be read", False
+    try:
+        info = api.call("conversations.info", channel=cid).get("channel") or {}
+    except Exception as e:  # noqa: BLE001
+        return f"Slack didn't say what it is ({type(e).__name__})", refused_for_good(e)
+    if not info.get("is_mpim"):
+        return "not a group DM any more", True
+    verdict, why = routing.Gate(agent, api, c["team"], c["bot_user"], gates, {}).group_gate(cid)
+    if verdict == "ok":
+        return None, False
+    return f"its people aren't all admitted now ({why})", verdict == "drop"
 
 
 def place_bot(cfg, agent, place, secrets=None):

@@ -17,6 +17,7 @@ class FakeSlack:
     def __init__(self, convs=None, history=None, members=None, fail=(), replies=None):
         self.convs, self.history, self.members, self.fail = convs or [], history or {}, members or {}, set(fail)
         self.replies = replies or {}
+        self.not_mpim = set()
         self.calls = []
 
     def _window(self, msgs, p):
@@ -68,6 +69,8 @@ class FakeSlack:
             page = self._page(rs, p)
             page["messages"] = [self._with_thread(cid, parent)] + page["messages"]   # the parent heads every page
             return page
+        if method == "conversations.info":
+            return {"channel": {"id": p["channel"], "is_mpim": p["channel"] in self.members and p["channel"] not in self.not_mpim}}
         if method == "conversations.open":
             return {"channel": {"id": "D" + p["users"]}}
         if method == "chat.postMessage":

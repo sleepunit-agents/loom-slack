@@ -23,7 +23,8 @@ bot's agent's (bridges.md, rule 1). Who may reach the agent (`lib/loomslack/rout
 - **a group DM:** every other member passes that, and there are at least two of them;
 - **Slack not answering** (`users.info` or `conversations.members` failing) is a wait, tried again for an hour;
   anyone else is left on read. The gates are the runtime's (`loom runtime gates people --agent a --json`), and
-  unreadable gates fail closed.
+  unreadable gates fail closed. A Slack id two people's gates entries claim is nobody's: who wrote can't be told, so its
+  messages are left on read (logged once).
 
 ## The delivery
 
@@ -86,7 +87,7 @@ gets a message as it's sent, so that's the shadow's blind spot, not a routing di
 ## Send
 
 `loom-slack send --place <place> --agent <agent>`, the text on stdin: a DM's conversation is opened by the user id, a
-group posts to its own id, split under 3900 characters, answering `{ok, id?}` or `{ok: false, reason, permanent?}`.
+group posts to its own id only while Slack says now (no cache) it's still a group DM whose every member the gates admit (else refused: for good, or for now if the gates or Slack don't answer), split under 3900 characters, answering `{ok, id?}` or `{ok: false, reason, permanent?}`.
 `permanent: true` is a refusal no retry will change, which the runtime records as refused and doesn't retry or keep
 for a body: shadow mode, no app for that agent, not a Slack place, nothing to send, settings that don't parse, and a
 post Slack refuses with an HTTP 4xx or an error code about the post (`channel_not_found`, `not_in_channel`,

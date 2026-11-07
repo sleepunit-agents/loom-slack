@@ -40,6 +40,15 @@ class Gate(unittest.TestCase):
         g.admit("D1", False, "U1")
         self.assertEqual([c[0] for c in api.calls], ["users.info"])
 
+    def test_an_id_two_people_claim_is_nobodys(self):
+        """Independent read (t-1745): a slip that puts Sam's id under the owner's card too must never make Sam's message
+        the owner's: the id is nobody's, and its messages are left on read."""
+        import copy
+        g = copy.deepcopy(GATES)
+        g["people"]["robin"]["slack"] = {"T1": ["U1", "U2"]}     # robin (tier 3) also claims sam's U2
+        self.assertEqual(gate(gates=g).admit("D2", False, "U2")[0], "drop")
+        self.assertEqual(gate(gates=g).admit("D1", False, "U1"), ("ok", {"kind": "person", "slug": "robin"}))
+
     def test_no_gates_no_one(self):
         self.assertEqual(gate(gates=None).admit("D1", False, "U1")[0], "drop")
 

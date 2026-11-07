@@ -66,12 +66,38 @@ class RateLimited(Exception):
         self.retry_after = retry_after
 
 
+_CLAIMED_TWICE = set()
+
+
+def people_of(gates, team, agent="?"):
+    """{user id: (slug, record)} for this workspace, from the gates' people, without any id two people claim: who wrote
+    can't be told then, and a message must never come from the wrong card (one of them the owner's). Each such id is
+    logged once a process; its messages are left on read until the gates are fixed."""
+    out = common.index(gates, "slack", team, sections=("people",))
+    claims = {}
+    for slug, rec in ((gates or {}).get("people") or {}).items():
+        if not isinstance(slug, str) or slug.startswith("_") or not isinstance(rec, dict):
+            continue
+        ids = rec.get("slack")
+        ids = ids.get(team) if isinstance(ids, dict) else ids
+        for uid in [ids] if isinstance(ids, (str, int)) and not isinstance(ids, bool) else ids if isinstance(ids, list) else []:
+            if isinstance(uid, (str, int)) and not isinstance(uid, bool):
+                claims.setdefault(str(uid), set()).add(slug)
+    for uid, slugs in claims.items():
+        if len(slugs) > 1:
+            out.pop(uid, None)
+            if (agent, uid) not in _CLAIMED_TWICE:
+                _CLAIMED_TWICE.add((agent, uid))
+                common.log(f"{agent}: a Slack id is in the gates under {len(slugs)} people; it's nobody's until that's fixed")
+    return out
+
+
 class Gate:
     """One agent's gate on Slack: its bot, its workspace, its gates document, and Slack's own answers (cached)."""
 
     def __init__(self, agent, api, team, bot_user, gates, cache, now=time.time):
         self.agent, self.api, self.team, self.bot_user, self.now = agent, api, team, bot_user, now
-        self.people = common.index(gates, "slack", team, sections=("people",)) if isinstance(gates, dict) else {}
+        self.people = people_of(gates, team, agent) if isinstance(gates, dict) else {}
         self.cache = cache            # persisted: {"users": {uid: …}, "members": {cid: …}}
         self.cache.setdefault("users", {})
         self.cache.setdefault("members", {})
