@@ -59,6 +59,8 @@ class Send(unittest.TestCase):
         code, ans = self.run_send(["--place", "dm:U1", "--agent", "kit"], "hi", cfg=cfg, secrets=sec)
         self.assertEqual((code, ans["ok"]), (1, False))
         self.assertIn("shadow", ans["reason"])
+        # Said as shadow, so the runtime can hand a DM to the old bridge meanwhile (t-1920); for good either way.
+        self.assertEqual((ans["permanent"], ans["shadow"]), (True, True))
         self.assertEqual((self.api.calls, sec.asked), ([], []))
 
     def test_a_dm_opens_the_conversation_and_posts_as_the_agents_bot(self):
@@ -128,6 +130,7 @@ class Permanent(unittest.TestCase):
                 a = self.ans(argv, text, cfg)
                 self.assertIs(a["permanent"], True)
                 self.assertFalse(a["ok"])
+                self.assertEqual(a.get("shadow", False), cfg is shadow, "only the shadow refusal says shadow")
         self.assertEqual(self.api.calls, [])
 
     def test_a_conversation_slack_wont_let_it_post_in_is_for_good(self):
