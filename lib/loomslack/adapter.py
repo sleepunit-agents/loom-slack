@@ -94,7 +94,7 @@ class Router:
         cut = self.now() - HANDLED_KEEP_S
         self.state["handled"] = {k: v for k, v in self.state["handled"].items() if v.get("at", 0) >= cut}
 
-    def fetch(self, a, place, ev):
+    def fetch(self, a, place, ev, mid=None):
         """Live only: each file of a message about to be delivered, kept for its conversation's bodies (files.py), as
         {file id: (kept id, None) | (None, why not)}; None in shadow, which fetches nothing."""
         if self.sink is None or self.files is None or not ev.get("files"):
@@ -109,7 +109,7 @@ class Router:
                     f = dict(f, **(a.api.call("files.info", file=f["id"]).get("file") or {}))
                 except Exception:  # noqa: BLE001  said in the message, never fatal
                     pass
-            out[f.get("id")] = self.files.fetch(a.agent, place, f, getattr(a.api, "token", ""))
+            out[f.get("id")] = self.files.fetch(a.agent, place, f, getattr(a.api, "token", ""), message=mid)
         return out
 
     def route(self, a, cid, group, ev):
@@ -133,7 +133,7 @@ class Router:
         names, total = gate.member_names(cid) if grouped else (None, None)
         label = routing.label_of(grouped, gate.people.get(ev.get("user")), names, total)
         body = common.delivery(mid, a.agent, "slack", place, label, frm, common.iso(ev["ts"]),
-                               routing.text_of(ev, gate.people, a.bot_user, a.agent, self.fetch(a, place, ev)))
+                               routing.text_of(ev, gate.people, a.bot_user, a.agent, self.fetch(a, place, ev, f"{a.agent}:{mid}")))
         if self.sink is None:
             self.shadow.routed(mid, a.agent, place, contract=self.contract_check(a.agent, mid, body))
             self.note_handled(a.agent, mid)

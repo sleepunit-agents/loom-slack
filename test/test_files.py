@@ -69,11 +69,13 @@ class Fetch(unittest.TestCase):
             got, out = self.take(agent, place, "F0ABC")
             self.assertEqual(got["ok"], False, (agent, place))
             self.assertFalse(out.exists())
-        self.assertEqual(self.files.fetch("kit", "dm:U1", f(), "xb"), ("F0ABC", None))
+        self.assertEqual(self.files.fetch("kit", "dm:U1", f(), "xb", message="kit:D1:2.0"), ("F0ABC", None))
         self.assertEqual(len(self.opener.reqs), 1, "fetched once")
+        self.assertEqual(self.take("kit", "dm:U1", "F0ABC")[0]["messages"], ["kit:D1:2.0"], "each message it came in")
 
     def test_never_sends_the_token_anywhere_but_slacks_file_host(self):
-        for url in ("https://evil.example/x", "http://files.slack.com/x", "", "https://files.slack.com.evil.example/x"):
+        for url in ("https://evil.example/x", "http://files.slack.com/x", "", "https://files.slack.com.evil.example/x",
+                    "https://evil.example\\@files.slack.com/x"):
             self.assertEqual(self.files.fetch("kit", "dm:U1", f(url=url), "xb")[0], None, url)
         self.assertEqual(self.opener.reqs, [])
 
@@ -125,7 +127,9 @@ class Route(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             code = cli.send(cli.config({"SLACK_MODE": "live", "SLACK_DATA": str(self.dir)}),
                             ["--place", "dm:U1", "--agent", "kit", "--file", "F0ABC", "--out", str(dest)])
-        self.assertEqual((code, json.loads(out.getvalue())["ok"], dest.read_bytes()), (0, True, b"JPEGDATA"))
+        got = json.loads(out.getvalue())
+        self.assertEqual((code, got["ok"], dest.read_bytes()), (0, True, b"JPEGDATA"))
+        self.assertEqual(got["messages"], [took[0]["id"]], "the delivery it came in, for the runtime to check")
         with contextlib.redirect_stdout(io.StringIO()):
             code = cli.send(cli.config({"SLACK_MODE": "live", "SLACK_DATA": str(self.dir)}),
                             ["--place", "dm:U2", "--agent", "kit", "--file", "F0ABC", "--out", str(self.dir / "no")])
