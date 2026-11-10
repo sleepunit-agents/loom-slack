@@ -246,8 +246,16 @@ def clean_text(text, people, bot_user=None, agent=None):
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def text_of(ev, people, bot_user=None, agent=None):
+def text_of(ev, people, bot_user=None, agent=None, fetched=None):
+    """The message's text as a body reads it. Its files are named; with `fetched` ({file id: (kept, why not)}, the
+    live intake's, files.py), each says how a body gets it, or why it can't."""
     text = clean_text(ev.get("text"), people, bot_user, agent)
     for f in ev.get("files", []) or []:
-        text += f" [file: {f.get('name')}]"
+        got = (fetched or {}).get(f.get("id"))
+        if got is None:
+            text += f" [file: {f.get('name')}]"
+        elif got[0]:
+            text += f" [file: {f.get('name')}; to read it: loom runtime file {got[0]}]"
+        else:
+            text += f" [file: {f.get('name')}: {got[1]}]"
     return text
