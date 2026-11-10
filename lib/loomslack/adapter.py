@@ -46,7 +46,7 @@ import time
 from pathlib import Path
 
 from loomvenue import common
-from loomslack import routing
+from loomslack import files, routing
 
 WAIT_TTL_S = 3600
 HANDLED_KEEP_S = 2 * 86400
@@ -69,9 +69,10 @@ class Router:
     `sink(agent, body)`, which answers True (done: delivered, or refused for good), False (tried again) or
     common.HOLD (held); HOLD is tested first (it's a truthy string)."""
 
-    def __init__(self, data_dir, shadow, sink=None, now=time.time, alerter=None):
+    def __init__(self, data_dir, shadow, sink=None, now=time.time, alerter=None, files=None):
         self.state_file = Path(data_dir) / "state.json"
         self.shadow, self.sink, self.now = shadow, sink, now
+        self.files = files                  # live: files.Files, what each delivered message's files are fetched into
         self.alerter = alerter or common.Alerter()
         self.held_now = set()       # "<agent>|<id>" held by this process: not sent again until it restarts
         self.state = common.load_json(self.state_file, {})
@@ -92,6 +93,24 @@ class Router:
     def prune(self):
         cut = self.now() - HANDLED_KEEP_S
         self.state["handled"] = {k: v for k, v in self.state["handled"].items() if v.get("at", 0) >= cut}
+
+    def fetch(self, a, place, ev, mid=None):
+        """Live only: each file of a message about to be delivered, kept for its conversation's bodies (files.py), as
+        {file id: (kept id, None) | (None, why not)}; None in shadow, which fetches nothing."""
+        if self.sink is None or self.files is None or not ev.get("files"):
+            return None
+        out = {}
+        for i, f in enumerate(ev.get("files") or []):
+            if i >= files.PER_MESSAGE:
+                out[f.get("id")] = (None, f"not fetched, more than {files.PER_MESSAGE} in one message")
+                continue
+            if not (f.get("url_private_download") or f.get("url_private")) and files.ID.match(str(f.get("id") or "")):
+                try:
+                    f = dict(f, **(a.api.call("files.info", file=f["id"]).get("file") or {}))
+                except Exception:  # noqa: BLE001  said in the message, never fatal
+                    pass
+            out[f.get("id")] = self.files.fetch(a.agent, place, f, getattr(a.api, "token", ""), message=mid)
+        return out
 
     def route(self, a, cid, group, ev):
         """'routed' | 'handled' | 'wait' | 'drop' | 'retry' (live: loom didn't take it) | 'held' (live: loom refused
@@ -114,7 +133,7 @@ class Router:
         names, total = gate.member_names(cid) if grouped else (None, None)
         label = routing.label_of(grouped, gate.people.get(ev.get("user")), names, total)
         body = common.delivery(mid, a.agent, "slack", place, label, frm, common.iso(ev["ts"]),
-                               routing.text_of(ev, gate.people, a.bot_user, a.agent))
+                               routing.text_of(ev, gate.people, a.bot_user, a.agent, self.fetch(a, place, ev, f"{a.agent}:{mid}")))
         if self.sink is None:
             self.shadow.routed(mid, a.agent, place, contract=self.contract_check(a.agent, mid, body))
             self.note_handled(a.agent, mid)
@@ -186,7 +205,8 @@ def slim(ev, keep_text):
     out = {k: ev.get(k) for k in ("type", "subtype", "user", "ts", "bot_id") if ev.get(k) is not None}
     if keep_text:
         out["text"] = ev.get("text")
-        out["files"] = [{"name": f.get("name")} for f in ev.get("files", []) or []]
+        out["files"] = [{k: f.get(k) for k in ("id", "name", "size", "url_private", "url_private_download") if f.get(k) is not None}
+                        for f in ev.get("files", []) or []]
     return out
 
 

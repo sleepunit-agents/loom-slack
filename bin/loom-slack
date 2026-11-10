@@ -10,6 +10,8 @@
         … --describe                       the place's rules, for a body's start: {ok, guest: false, peer: false,
                                            venue, readers: [], members, notes} (Slack routes only tier 2 and up;
                                            members: who's in it, by slug; notes: scope and group-tier names)
+        … --file ID --out PATH            a file someone sent in that place (the runtime asks, for a body there):
+                                           copied to PATH; {ok, name, size, sha256}
         … --status working|done [--message ID]...   a body at work there (the runtime's word): live, the run loop
                                            puts 👀 on the message it took, off once it answers; {ok, stop?}
     loom-slack compare --start T --adapter GLOB --bridge GLOB [--hours 24] [--json] [--check-gone]
@@ -36,7 +38,7 @@ HERE = Path(os.path.realpath(__file__)).parent
 sys.path.insert(0, str(HERE.parent / "lib"))
 
 from loomvenue import common  # noqa: E402
-from loomslack import adapter, routing  # noqa: E402
+from loomslack import adapter, files, routing  # noqa: E402
 
 PIECE = "slack"
 VENUE = "slack"
@@ -154,7 +156,8 @@ def run(cfg):
         if missing:
             common.log(f"live mode needs an app token (SLACK_APP_TOKEN) for {', '.join(missing)}")
             return 1
-        intake = adapter.Socket(adapter.Router(cfg["data"], shadow, sink=make_sink(cfg, alerter=alerter), alerter=alerter),
+        intake = adapter.Socket(adapter.Router(cfg["data"], shadow, sink=make_sink(cfg, alerter=alerter), alerter=alerter,
+                                                 files=files.Files(cfg["data"])),
                                 agents, app_tokens)
         intake.start()
     stopping = []
@@ -223,6 +226,13 @@ def send(cfg, argv, stdin=None, secrets=None, api_for=None):
         return never("usage: loom-slack send --place <place> --agent <agent>")
     if "--describe" in argv:
         return answer(describe(cfg, agent, place, secrets=secrets, api_for=api_for))
+    if "--file" in argv:
+        # A file someone sent in this place, for a body there (the runtime asks, once the body proves it holds the
+        # conversation, t-1961): copied to --out, only if it was kept under this agent and this place (files.py).
+        i, j = argv.index("--file"), argv.index("--out") if "--out" in argv else -1
+        if i + 1 >= len(argv) or j < 0 or j + 1 >= len(argv):
+            return never("usage: loom-slack send --place <place> --agent <agent> --file <id> --out <path>")
+        return answer(files.Files(cfg["data"]).take(agent, place, argv[i + 1], argv[j + 1]))
     if "--status" in argv:
         i = argv.index("--status")
         state = argv[i + 1] if i + 1 < len(argv) else ""
